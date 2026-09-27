@@ -378,6 +378,24 @@ def split_pause_markers(text: str) -> Tuple[str, List[int]]:
     return " ".join(segs), offsets
 
 
+def _cue_list(v) -> list:
+    """A paragraph's "cues" as a list, whatever shape the model wrote it in.
+    Seen live: "cues": 12 (one bare number) killed a whole 25-minute run with
+    "'int' object is not iterable". Also accepted: "12", "12, 13", "12-14"."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple, set)):
+        return list(v)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return [v]
+    if isinstance(v, str):
+        m = re.fullmatch(r"\s*(\d+)\s*[-–]\s*(\d+)\s*", v)
+        if m and int(m.group(1)) <= int(m.group(2)) <= int(m.group(1)) + 200:
+            return list(range(int(m.group(1)), int(m.group(2)) + 1))
+        return re.findall(r"\d+", v)
+    return []
+
+
 def _rows_from_reply(paras, page) -> Tuple[List[Row], bool]:
     """(rows, repaired) for one passage. Rows cover EVERY cue of the page
     exactly once, in order, whatever the model got wrong: each paragraph
@@ -398,7 +416,7 @@ def _rows_from_reply(paras, page) -> Tuple[List[Row], bool]:
         text, pauses = split_pause_markers(str(p.get("text") or "").strip())
         if not text:
             continue
-        raw = [_as_int(x) for x in (p.get("cues") or [])]
+        raw = [_as_int(x) for x in _cue_list(p.get("cues"))]
         cues = [i for i in raw if i in idset]
         if len(cues) != len(raw):
             repaired = True
@@ -493,8 +511,8 @@ def _complete_salvage(data, batch):
         if not isinstance(n, int) or not 1 <= n <= len(batch):
             continue
         ids = {c[0] for c in batch[n - 1]["page"]}
-        got = {c for p in item.get("paragraphs") or [] for c in p.get("cues")
-               or []}
+        got = {_as_int(c) for p in item.get("paragraphs") or []
+               if isinstance(p, dict) for c in _cue_list(p.get("cues"))}
         if ids <= got:
             keep.append(item)
     return {"passages": keep} if keep else None
@@ -544,7 +562,9 @@ def _call_batch(batch: List[dict], language: str, static: str, model: str,
         p = batch[n - 1]
         try:
             out[p["idx"]] = _rows_from_reply(item.get("paragraphs"), p["page"])
-        except ValueError:
+        except (ValueError, TypeError, KeyError):
+            # One malformed passage must not sink the batch: it goes to the
+            # solo retry like any other dropped passage.
             continue
     return out
 
