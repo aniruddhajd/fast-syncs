@@ -1,0 +1,30 @@
+# User secrets and machine-local settings — never committed.
+config/
+dub_panel_settings.json
+reaper/voice_bookmarks.json
+reaper/voice_cache.json
+reaper/tts_history.json
+engine/engine_settings.json
+
+# Local data (translation memory database).
+data/
+
+# Python environment and caches.
+venv/
+__pycache__/
+*.pyc
+
+# Portable ffmpeg dropped in by setup_windows.bat's fallback installer.
+ffmpeg/
+
+# Engine runtime status files.
+engine/status/
+
+# v0.11 voice preview scratch audio (one sample at a time).
+engine/preview/
+
+# v0.7 per-project run history (index into each run's out_dir).
+engine/history/
+
+# macOS noise.
+.DS_Store
