@@ -168,6 +168,18 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+25. **v0.23.0: six text corrections** (review screen and Regenerate tab,
+    shared `V5.ASSIST_QUICK`), in three pairs:
+    - **Speed up / Slow down**: speed only, the script never changes. The
+      instruction starts with `SPEED ONLY`; `review_assist` then returns no
+      alternatives (enforced in code, not only by the prompt) and keeps
+      `speed`, shown as 'Apply assistant speed'.
+    - **Longer (add words)** (replaces Longer + Fix underfit) / **Longer
+      (add pauses)** (same words, natural pauses).
+    - **Shorter (fewer words)** / **Shorter (skip pauses)** (was Remove
+      pauses: same words, one continuous flow).
+    - Alternatives unchanged. Test: `engine/tests/test_assist_speed_only.py`.
+
 24. **v0.22.1: "Increase length (pauses)" quick ask** (review screen and
     Regenerate tab, shared `V5.ASSIST_QUICK`). The mirror of v0.21.1's
     *Remove pauses*: an underfit line keeps the same words, meaning, names

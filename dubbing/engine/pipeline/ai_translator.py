@@ -1028,6 +1028,8 @@ def review_assist(english: str, current: str, speech_s: float, hard_s: float,
         "alternatives at that length. Keep names and numbers unless told "
         "otherwise; a longer line may add natural connecting words, never "
         "new meaning.\n"
+        "- SPEED ONLY instructions: never rewrite the line; return an empty "
+        "\"alternatives\" list and set only \"speed\".\n"
         "- Speed up / slow down / faster / slower: set \"speed\" to a factor "
         f"between {ASSIST_SPEED_MIN} and {ASSIST_SPEED_MAX} (1.10 = 10% "
         "faster, 0.90 = 10% slower); if a number is given use it, otherwise "
@@ -1054,8 +1056,12 @@ def review_assist(english: str, current: str, speech_s: float, hard_s: float,
     if not isinstance(data, dict):
         return out
     out["reply"] = " ".join(str(data.get("reply") or "").split())
+    # v0.23: the panel's Speed up / Slow down send "SPEED ONLY" — the script
+    # must not change, so any rewritten line the model offers is dropped here
+    # rather than trusted to the prompt.
+    speed_only = "SPEED ONLY" in (instruction or "").upper()
     seen = set()
-    for a in data.get("alternatives") or []:
+    for a in ([] if speed_only else (data.get("alternatives") or [])):
         t = " ".join(str(a or "").split())
         if t and t != current and t not in seen:
             seen.add(t)

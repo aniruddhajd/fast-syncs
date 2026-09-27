@@ -11582,40 +11582,41 @@ end
 -- free-text instruction; the conversation per row; alternatives appear in
 -- the SUGGESTIONS list (Use), a suggested speed as 'Apply assistant speed'.
 V5.ASSIST_QUICK = {
-  { 'Shorter',      'Make this line shorter so it fits its slot, keeping the meaning.' },
-  { 'Longer',       'Make this line a little longer and fuller so it fills its slot naturally, without adding new meaning.' },
-  { 'Speed up',     'Speed this line up so it fits its slot.' },
-  { 'Slow down',    'Slow this line down so it fills its slot.' },
-  -- v0.18.8: the opposite of an overflow — the dub ends early and leaves
-  -- silence. Fuller wording when it reads naturally, else a slower speed.
-  { 'Fix underfit', 'This line is UNDERFIT: it is too short for its slot and ' ..
-                    'finishes early, leaving silence. Make it fill the slot ' ..
-                    'naturally: give 2-3 slightly fuller renderings sized to ' ..
-                    'the speech slot, using natural connecting words and ' ..
-                    'phrasing, never new meaning. If fuller wording would ' ..
-                    'sound padded, also set a slower speed that fills the ' ..
-                    'slot.' },
-  -- v0.21.1: the voice breaks where the text breaks — commas, dashes, "…",
-  -- full stops mid-line. Rewrite so it is spoken in one continuous flow.
-  { 'Remove pauses', 'Remove the pauses: rewrite this line so it is spoken ' ..
-                     'in ONE continuous, natural flow. Drop pause-causing ' ..
-                     'punctuation (commas, dashes, ellipses, semicolons, and ' ..
-                     'full stops inside the line), join short sentences with ' ..
-                     'natural connecting words, and keep only the final full ' ..
-                     'stop. Keep the meaning, every name and number, and ' ..
-                     'about the same length. Give 2-3 alternatives.' },
-  -- v0.22.1: the mirror of 'Remove pauses'. An underfit line fills its slot
-  -- by breathing where a speaker naturally would, not by gaining words.
-  { 'Increase length (pauses)',
-    'Increase the length using pauses: this line finishes before its slot ' ..
-    'ends. Keep the SAME words, meaning, names and numbers. Do not add new ' ..
-    'words or content. Make it take longer to speak by adding natural ' ..
-    'pauses where a speaker would breathe: commas at clause breaks, a dash ' ..
-    'or three dots (...) before an important phrase, and a full stop between two ' ..
-    'thoughts. Put pauses only where they sound natural when read aloud, ' ..
-    'never inside a name or a number. Give 2-3 alternatives with a ' ..
-    'different amount of pausing, and if pauses alone cannot fill the ' ..
-    'slot, also set a slightly slower speed.' },
+  -- v0.23: six text corrections in three pairs, so each button does ONE kind
+  -- of change. "SPEED ONLY" is a contract with the engine: review_assist
+  -- returns no alternative lines for it, so the script cannot change.
+  { 'Speed up',
+    'SPEED ONLY: do not change the script. Set a faster speed so this line ' ..
+    'fits its slot.' },
+  { 'Slow down',
+    'SPEED ONLY: do not change the script. Set a slower speed so this line ' ..
+    'fills its slot.' },
+  -- The old Longer + Fix underfit: fuller wording, never new meaning.
+  { 'Longer (add words)',
+    'Increase the length by adding words: this line finishes before its ' ..
+    'slot ends. Give 2-3 slightly fuller renderings sized to the speech ' ..
+    'slot, using natural connecting words and phrasing. Never add new ' ..
+    'meaning; keep every name and number.' },
+  -- v0.22.1: same words, longer through pauses where a speaker breathes.
+  { 'Longer (add pauses)',
+    'Increase the length using pauses: keep the SAME words, meaning, names ' ..
+    'and numbers and add no new words. Make it take longer to speak by ' ..
+    'adding natural pauses where a speaker would breathe: commas at clause ' ..
+    'breaks, a dash or three dots (...) before an important phrase, and a ' ..
+    'full stop between two thoughts. Never inside a name or a number. Give ' ..
+    '2-3 alternatives with a different amount of pausing.' },
+  { 'Shorter (fewer words)',
+    'Shorten the length by changing or using fewer words: give 2-3 shorter ' ..
+    'renderings that fit the slot. Drop filler and repetition before ' ..
+    'meaning; use shorter synonyms; keep every name and number.' },
+  -- v0.21.1 Remove pauses, now framed as a way to shorten: same words, one
+  -- continuous flow, so the voice does not stop mid-line.
+  { 'Shorter (skip pauses)',
+    'Shorten the length by skipping pauses: keep the SAME words, meaning, ' ..
+    'names and numbers. Remove pause-causing punctuation inside the line ' ..
+    '(commas, dashes, three dots, semicolons, full stops between clauses) ' ..
+    'and join short sentences so it is spoken in ONE continuous flow. ' ..
+    'Keep only the final full stop. Give 2-3 alternatives.' },
   { 'Alternatives', 'Give me 3 alternative renderings of this line.' },
 }
 
