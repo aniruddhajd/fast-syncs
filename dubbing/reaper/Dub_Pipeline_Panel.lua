@@ -4132,6 +4132,35 @@ function V5.conn_fail_msg(pv, code, body)
   return head
 end
 
+-- v0.22.4: curl's own stderr -> one readable line with the likely fix, or nil
+-- when curl said nothing. "no answer in 20 s" used to cover all of these.
+function V5.conn_curl_err(raw)
+  local s = (raw or ''):gsub('[\r\n]+', ' '):gsub('^%s+', ''):gsub('%s+$', '')
+  if s == '' then return nil end
+  local low = s:lower()
+  local hint
+  if low:find('not recognized', 1, true) or low:find('not found', 1, true)
+     and low:find('curl', 1, true) then
+    hint = 'curl is missing on this PC (Windows 10 1803+ ships it)'
+  elseif low:find('revocation', 1, true) then
+    hint = 'antivirus/network blocks the certificate check — try another ' ..
+           'network, or turn off HTTPS scanning in the antivirus'
+  elseif low:find('schannel', 1, true) or low:find('ssl', 1, true)
+         or low:find('certificate', 1, true) then
+    hint = 'secure connection failed — antivirus or network is intercepting HTTPS'
+  elseif low:find('resolve host', 1, true) then
+    hint = 'no internet / DNS — check the connection'
+  elseif low:find('proxy', 1, true) then
+    hint = 'proxy problem — check Windows proxy settings'
+  elseif low:find('timed out', 1, true) then
+    hint = 'timed out — the network is slow or blocks this site'
+  elseif low:find('connect', 1, true) then
+    hint = 'could not connect — firewall or network blocks the site'
+  end
+  s = s:sub(1, 160)
+  return hint and (hint .. '  [' .. s .. ']') or ('curl: ' .. s)
+end
+
 -- Fire the probe. Nothing here blocks: curl writes a .part plus a file holding
 -- its HTTP code, then renames the body into place as the completion signal.
 function V5.conn_probe(pv)
@@ -4152,12 +4181,15 @@ function V5.conn_probe(pv)
   local out  = V5.tmp_dir() .. sep .. 'fs_conn_' .. pv .. '.json'
   local part = out .. '.part'
   local code = out .. '.code'
+  local err  = out .. '.err'
   os.remove(out)
   os.remove(part)
   os.remove(code)
+  os.remove(err)
 
   st.out       = out
   st.code_file = code
+  st.err_file  = err
   st.state     = 'checking'
   st.msg       = nil
   st.deadline  = os.time() + 20
@@ -4166,17 +4198,22 @@ function V5.conn_probe(pv)
   if _is_windows() then
     -- One `&` not `&&`: a curl that fails still has to hand us a completion
     -- signal, or the row would sit on "checking" until the 20 s deadline.
-    local line = 'curl.exe -s -m 15 -o "' .. part .. '" -w "%{http_code}"' ..
-      h .. ' "' .. url .. '" > "' .. code .. '" & move /y "' .. part ..
-      '" "' .. out .. '"'
+    -- v0.22.4: -S + 2> keeps curl's own error (TLS, proxy, DNS, "curl.exe is
+    -- not recognized") so the row can say WHY. `type nul >>` creates the body
+    -- file when curl wrote none, so a failed curl completes at once instead of
+    -- showing "no answer in 20 s" — and, unlike `if not exist`, it cannot
+    -- swallow the `& move` that follows it.
+    local line = 'curl.exe -sS -m 15 -o "' .. part .. '" -w "%{http_code}"' ..
+      h .. ' "' .. url .. '" > "' .. code .. '" 2> "' .. err .. '" & type nul >> "' ..
+      part .. '" & move /y "' .. part .. '" "' .. out .. '"'
     -- One .bat per provider: probes for several APIs can be in flight at once.
     if not V5.win_hidden(line, 'conn_' .. pv) then
       reaper.ExecProcess('cmd.exe /C ' .. line, -2)
     end
   else
-    os.execute('{ curl -s -m 15 -o "' .. part .. '" -w "%{http_code}"' .. h ..
-      ' "' .. url .. '" > "' .. code .. '" ; mv -f "' .. part .. '" "' ..
-      out .. '" ; } >/dev/null 2>&1 &')
+    os.execute('{ curl -sS -m 15 -o "' .. part .. '" -w "%{http_code}"' .. h ..
+      ' "' .. url .. '" > "' .. code .. '" 2> "' .. err .. '" ; touch "' ..
+      part .. '" ; mv -f "' .. part .. '" "' .. out .. '" ; } >/dev/null 2>&1 &')
   end
 end
 
@@ -4268,6 +4305,8 @@ function V5.conn_poll()
                                 :match('(%d%d%d)') or '') or 0
           os.remove(st.out)
           os.remove(st.code_file)
+          local cerr = st.err_file and V5.conn_curl_err(read_all(st.err_file))
+          if st.err_file then os.remove(st.err_file) end
           local models = V5.conn_models_from(pv, body)
           local http_ok = (code >= 200 and code < 300)
           if http_ok and #models > 0 then
@@ -4290,6 +4329,11 @@ function V5.conn_poll()
             st.state = 'ok'
             st.msg   = 'key accepted, but it did not list any models'
             st.models, st.model = {}, nil
+          elseif code == 0 and cerr then
+            -- curl never got an HTTP answer: say what curl itself said.
+            st.state  = 'bad'
+            st.models, st.model = {}, nil
+            st.msg    = cerr
           else
             st.state  = 'bad'
             st.models, st.model = {}, nil
@@ -4297,7 +4341,8 @@ function V5.conn_poll()
           end
         elseif os.time() > (st.deadline or 0) then
           st.state = 'bad'
-          st.msg   = 'no answer in 20 s — check the address and your network'
+          st.msg   = (st.err_file and V5.conn_curl_err(read_all(st.err_file)))
+                     or 'no answer in 20 s — check the address and your network'
         end
       end
     end
