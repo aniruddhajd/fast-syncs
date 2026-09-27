@@ -148,6 +148,101 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "app").lower()).strip("-")
 
 
+# ── Diagnostic logs ───────────────────────────────────────────────────────────
+# A bug report is only as good as the log behind it, so the dialog attaches the
+# app's recent logs as ONE zip (on by default, a checkbox turns it off). What
+# goes in: the Auto Sync log, and the engine log + result manifest of the
+# newest dubbing runs. What never goes in: settings/config files (they hold
+# the API keys), audio, and anything outside the app folder. Every text file
+# is scrubbed of key-shaped strings first, as a second line of defence.
+
+LOG_RUNS = 3                    # newest dubbing runs to include
+LOG_TAIL_BYTES = 400 * 1024     # keep the END of a long log (that's where it failed)
+
+_SECRET_RES = [
+    re.compile(r"sk_[A-Za-z0-9]{20,}"),                  # ElevenLabs
+    re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),               # OpenAI-style
+    re.compile(r"AIza[0-9A-Za-z_\-]{30,}"),              # Google API
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),           # GitHub
+    re.compile(r"github_pat_[A-Za-z0-9_]{30,}"),
+    re.compile(r"(?i)(xi-api-key|authorization|api[_-]?key|token)"
+               r"(\"?\s*[:=]\s*\"?)([^\s\"',}]{8,})"),
+]
+
+
+def _scrub(text: str) -> str:
+    for rx in _SECRET_RES:
+        if rx.groups >= 3:
+            text = rx.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+        else:
+            text = rx.sub("[REDACTED]", text)
+    return text
+
+
+def _read_tail(path: str) -> str:
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - LOG_TAIL_BYTES))
+        data = f.read()
+    text = data.decode("utf-8", "replace")
+    if size > LOG_TAIL_BYTES:
+        text = "[... first %d KB cut — this is the end of the log ...]\n" % (
+            (size - LOG_TAIL_BYTES) // 1024) + text
+    return text
+
+
+def _log_files(base: str):
+    """[(archive_name, path)] of the logs worth sending, newest runs first."""
+    out = []
+    for name in ("VERSION", "sync_python_log.txt", "sync_results.json"):
+        p = os.path.join(base, name)
+        if os.path.isfile(p):
+            out.append(("auto_sync/" + name, p))
+    status = os.path.join(base, "dubbing", "engine", "status")
+    runs = []
+    if os.path.isdir(status):
+        for d in os.listdir(status):
+            full = os.path.join(status, d)
+            log = os.path.join(full, "engine_log.txt")
+            if os.path.isfile(log):
+                runs.append((os.path.getmtime(log), d, full))
+    for _mt, d, full in sorted(runs, reverse=True)[:LOG_RUNS]:
+        for name in ("engine_log.txt", "engine_done.json"):
+            p = os.path.join(full, name)
+            if os.path.isfile(p):
+                out.append(("dubbing_runs/%s/%s" % (d, name), p))
+    return out
+
+
+def collect_logs(app_version: str = "", base: str = "") -> str:
+    """Bundle the recent logs into diagnostics_<stamp>.zip in the temp folder.
+    Returns its path, or "" when there is nothing to send. Never raises."""
+    import datetime
+    import platform
+    import tempfile
+    import zipfile
+    try:
+        base = base or os.path.dirname(os.path.abspath(__file__))
+        files = _log_files(base)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(tempfile.gettempdir(), "diagnostics_%s.zip" % stamp)
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("system.txt",
+                       "App version: %s\nOS: %s\nPython: %s\nCollected: %s\n"
+                       "Files: %d\n" % (app_version or "?", platform.platform(),
+                                        sys.version.split()[0], stamp,
+                                        len(files)))
+            for arc, p in files:
+                try:
+                    z.writestr(arc, _scrub(_read_tail(p)))
+                except OSError:
+                    pass
+        return path
+    except Exception:                                  # noqa: BLE001
+        return ""
+
+
 def send_feedback(app_name: str, app_version: str, kind: str, sender: str,
                   message: str, attachments=None,
                   progress=None) -> str:
@@ -162,10 +257,12 @@ def send_feedback(app_name: str, app_version: str, kind: str, sender: str,
 
     links = []
     if attachments:
-        notify("Uploading screenshots…")
+        notify("Uploading attachments…")
         _ensure_branch()
         for p in attachments:
             links.append((os.path.basename(p), _upload_attachment(p, stamp, slug)))
+    log_links = [(n, u) for n, u in links if n.startswith("diagnostics_")]
+    links = [(n, u) for n, u in links if not n.startswith("diagnostics_")]
 
     notify("Creating report…")
     first_line = (message.strip().splitlines() or ["(no message)"])[0][:60]
@@ -178,6 +275,9 @@ def send_feedback(app_name: str, app_version: str, kind: str, sender: str,
     if links:
         body += "\n---\n\n**Screenshots:**\n" + "\n".join(
             "- [%s](%s)" % (n, u) for n, u in links)
+    if log_links:
+        body += "\n---\n\n**Logs:**\n" + "\n".join(
+            "- [%s](%s)" % (n, u) for n, u in log_links)
     resp = _api("https://api.github.com/repos/" + FEEDBACK_REPO + "/issues",
                 method="POST",
                 payload={"title": title, "body": body,
@@ -319,6 +419,15 @@ def open_feedback_dialog(root=None, app_name="App", app_version="",
               ).pack(side="left", padx=(6, 0), pady=2)
     attach_lbl.pack(fill="x", padx=14, pady=(2, 0))
 
+    # On by default: the developer can only fix what the log shows.
+    logs_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(dlg, text="Include app logs (recommended). Recent run logs "
+                             "only; no API keys or settings.",
+                   variable=logs_var, bg=th["bg"], fg=th["fg"],
+                   selectcolor=th["bg2"], activebackground=th["bg"],
+                   activeforeground=th["accent"], font=(F, 9), cursor="hand2",
+                   anchor="w").pack(fill="x", padx=14, pady=(4, 0))
+
     status_lbl = tk.Label(dlg, text="", bg=th["bg"], fg=th["fg_faint"],
                           font=(F, 9), anchor="w")
     status_lbl.pack(fill="x", padx=14, pady=(4, 0))
@@ -344,7 +453,12 @@ def open_feedback_dialog(root=None, app_name="App", app_version="",
               cursor="hand2", relief="flat", padx=10
               ).pack(side="right", padx=(0, 8))
 
-    def _worker(kind, sender, message, files):
+    def _worker(kind, sender, message, files, with_logs):
+        if with_logs:
+            root.after(0, status_lbl.config, {"text": "Collecting logs…"})
+            log_zip = collect_logs(app_version)
+            if log_zip:
+                files = files + [log_zip]
         try:
             url = send_feedback(
                 app_name, app_version, kind, sender, message, files,
@@ -388,7 +502,7 @@ def open_feedback_dialog(root=None, app_name="App", app_version="",
         status_lbl.config(text="Sending…")
         threading.Thread(target=_worker,
                          args=(kind_var.get(), name_entry.get().strip(),
-                               message, list(attachments)),
+                               message, list(attachments), logs_var.get()),
                          daemon=True).start()
 
     send_btn.config(command=_send)
@@ -415,7 +529,17 @@ def main(argv=None):
                     metavar="FILE", help="screenshot to attach (repeatable)")
     ap.add_argument("--gui", action="store_true",
                     help="open the graphical feedback dialog instead")
+    ap.add_argument("--no-logs", action="store_true",
+                    help="do not attach the app's recent logs")
     args = ap.parse_args(argv)
+    if not args.app_version:
+        # The launchers pass no version; the VERSION file beside us is it.
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "VERSION"), encoding="utf-8") as f:
+                args.app_version = f.read().strip()
+        except OSError:
+            pass
 
     if args.gui:
         open_feedback_dialog(None, app_name=args.app,
@@ -439,6 +563,10 @@ def main(argv=None):
         print("No message — nothing sent.")
         return 1
 
+    if not args.no_logs:
+        log_zip = collect_logs(args.app_version)
+        if log_zip:
+            args.attach = args.attach + [log_zip]
     try:
         url = send_feedback(args.app, args.app_version, args.kind,
                             args.name, message, args.attach,
