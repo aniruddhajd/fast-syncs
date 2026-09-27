@@ -1,6 +1,6 @@
 """app_feedback.py — drop-in feedback sender (message + screenshots → GitHub issue).
 
-Shared across all of Darpan's apps: every report lands as an issue on ONE
+Shared across all of these apps: every report lands as an issue on ONE
 private inbox repo (FEEDBACK_REPO below), labeled with the app's name, so
 there is a single place to watch. Screenshots are committed to that repo's
 `feedback` branch and linked from the issue.
@@ -45,7 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-FEEDBACK_REPO = "darpantimsina72/app-feedback"   # owner/repo of the inbox
+FEEDBACK_REPO = "aniruddhajd/app-feedback"      # owner/repo of the inbox
 FEEDBACK_BRANCH = "feedback"                     # attachments branch
 MAX_ATTACHMENT_MB = 20
 
