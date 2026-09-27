@@ -90,7 +90,7 @@ window — it runs the updater for you in a terminal. Or run it yourself:
 
 **You now update to released versions, not to whatever was committed last.**
 The updater downloads the newest published
-[release](https://github.com/darpantimsina72/fast-syncs/releases) rather than
+[release](https://github.com/aniruddhajd/fast-syncs/releases) rather than
 the tip of the `main` branch, so you only ever move to a version that was
 deliberately shipped.
 
@@ -120,14 +120,14 @@ settings and `venv` carry over.
 
 If an update breaks something, download the `fast-syncs.zip` of an earlier
 release from the
-[Releases page](https://github.com/darpantimsina72/fast-syncs/releases) and
+[Releases page](https://github.com/aniruddhajd/fast-syncs/releases) and
 unzip it **over** your folder. Your settings and `venv` are preserved, exactly
 as with a normal update.
 
 To pin the updater itself to a specific release:
 
 ```bash
-FAST_SYNCS_ZIP_URL=https://github.com/darpantimsina72/fast-syncs/releases/download/v0.13.0/fast-syncs.zip bash update.sh
+FAST_SYNCS_ZIP_URL=https://github.com/aniruddhajd/fast-syncs/releases/download/v0.13.0/fast-syncs.zip bash update.sh
 ```
 
 (On Windows, `set FAST_SYNCS_ZIP_URL=…` before running `update.bat`.)

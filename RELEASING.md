@@ -64,7 +64,7 @@ Bump `VERSION` and merge again when you actually want to ship.
 The **Update…** button (and `update.sh` / `update.bat`) now downloads:
 
 ```
-https://github.com/darpantimsina72/fast-syncs/releases/latest/download/fast-syncs.zip
+https://github.com/aniruddhajd/fast-syncs/releases/latest/download/fast-syncs.zip
 ```
 
 That URL is stable and always resolves to the newest *published release*.
@@ -83,13 +83,13 @@ whatever branch the clone is on. If you cloned before this change you are on
 Something shipped broken? Two ways, no repo access needed:
 
 **Any user, right now:** download the previous `fast-syncs.zip` from the
-[Releases page](https://github.com/darpantimsina72/fast-syncs/releases) and
+[Releases page](https://github.com/aniruddhajd/fast-syncs/releases) and
 unzip it over the folder. Settings and `venv/` are preserved.
 
 **Scripted:**
 
 ```bash
-FAST_SYNCS_ZIP_URL=https://github.com/darpantimsina72/fast-syncs/releases/download/v0.13.0/fast-syncs.zip bash update.sh
+FAST_SYNCS_ZIP_URL=https://github.com/aniruddhajd/fast-syncs/releases/download/v0.13.0/fast-syncs.zip bash update.sh
 ```
 
 **As the maintainer**, if a release is bad: fix forward. Bump to the next

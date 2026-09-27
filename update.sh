@@ -18,9 +18,9 @@ set -e
 # were deliberately shipped rather than whatever was committed last.
 #
 # To install a specific older version instead, download its fast-syncs.zip
-# from https://github.com/darpantimsina72/fast-syncs/releases and unzip it
+# from https://github.com/aniruddhajd/fast-syncs/releases and unzip it
 # over this folder — settings and venv are preserved either way.
-ZIP_URL="https://github.com/darpantimsina72/fast-syncs/releases/latest/download/fast-syncs.zip"
+ZIP_URL="https://github.com/aniruddhajd/fast-syncs/releases/latest/download/fast-syncs.zip"
 
 # Set FAST_SYNCS_ZIP_URL to override (e.g. to pin an older release):
 #   FAST_SYNCS_ZIP_URL=https://github.com/.../download/v0.12.0/fast-syncs.zip bash update.sh
@@ -30,7 +30,7 @@ ZIP_URL="${FAST_SYNCS_ZIP_URL:-$ZIP_URL}"
 # URL 404s until something has actually been published, and an updater that
 # stops working the moment this lands would be worse than the problem it fixes.
 # Tried only if the release download fails, so a normal update never touches it.
-FALLBACK_ZIP_URL="https://codeload.github.com/darpantimsina72/fast-syncs/zip/refs/heads/main"
+FALLBACK_ZIP_URL="https://codeload.github.com/aniruddhajd/fast-syncs/zip/refs/heads/production"
 
 # Set when the new files could NOT be fetched, so the final message never
 # claims an update that did not happen.

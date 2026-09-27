@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+24. **v0.22.1: "Increase length (pauses)" quick ask** (review screen and
+    Regenerate tab, shared `V5.ASSIST_QUICK`). The mirror of v0.21.1's
+    *Remove pauses*: an underfit line keeps the same words, meaning, names
+    and numbers and gets longer by natural pauses (commas at clause
+    breaks, a dash or `...` before a key phrase, a full stop between
+    thoughts), never inside a name or number. 2-3 alternatives with
+    different amounts of pausing, plus a slower speed if pauses alone
+    cannot fill the slot. Panel only: the instruction goes through the
+    existing `--review-assist` request; no engine or file-format change.
+
 23. **v0.22.0: ElevenLabs Dub — `--script-source eleven`.** ElevenLabs
     Dubbing Studio does the job: it transcribes, finds the speakers,
     translates and voices. We keep the review pause and add voice selection.

@@ -3826,7 +3826,7 @@ end
 -- DAW on every slow network. curl writes a .part and renames it, so a frame
 -- that catches the file mid-write cannot read half a version number.
 V5.UPD_URL =
-  'https://raw.githubusercontent.com/darpantimsina72/fast-syncs/main/VERSION'
+  'https://raw.githubusercontent.com/aniruddhajd/fast-syncs/production/VERSION'
 V5.upd = {
   state     = 'idle',   -- idle | checking | current | available | failed
   latest    = nil,
@@ -11559,6 +11559,18 @@ V5.ASSIST_QUICK = {
                      'natural connecting words, and keep only the final full ' ..
                      'stop. Keep the meaning, every name and number, and ' ..
                      'about the same length. Give 2-3 alternatives.' },
+  -- v0.22.1: the mirror of 'Remove pauses'. An underfit line fills its slot
+  -- by breathing where a speaker naturally would, not by gaining words.
+  { 'Increase length (pauses)',
+    'Increase the length using pauses: this line finishes before its slot ' ..
+    'ends. Keep the SAME words, meaning, names and numbers. Do not add new ' ..
+    'words or content. Make it take longer to speak by adding natural ' ..
+    'pauses where a speaker would breathe: commas at clause breaks, a dash ' ..
+    'or three dots (...) before an important phrase, and a full stop between two ' ..
+    'thoughts. Put pauses only where they sound natural when read aloud, ' ..
+    'never inside a name or a number. Give 2-3 alternatives with a ' ..
+    'different amount of pausing, and if pauses alone cannot fill the ' ..
+    'slot, also set a slightly slower speed.' },
   { 'Alternatives', 'Give me 3 alternative renderings of this line.' },
 }
 

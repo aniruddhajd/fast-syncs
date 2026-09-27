@@ -40,13 +40,13 @@ rem (see .github\workflows\release.yml), so users move between versions that
 rem were deliberately shipped rather than whatever was committed last.
 rem
 rem To install a specific older version instead, download its fast-syncs.zip
-rem from https://github.com/darpantimsina72/fast-syncs/releases and unzip it
+rem from https://github.com/aniruddhajd/fast-syncs/releases and unzip it
 rem over this folder - settings and venv are preserved either way.
-set "ZIP_URL=https://github.com/darpantimsina72/fast-syncs/releases/latest/download/fast-syncs.zip"
+set "ZIP_URL=https://github.com/aniruddhajd/fast-syncs/releases/latest/download/fast-syncs.zip"
 rem Set FAST_SYNCS_ZIP_URL beforehand to override (e.g. to pin an older release).
 if defined FAST_SYNCS_ZIP_URL set "ZIP_URL=%FAST_SYNCS_ZIP_URL%"
 rem Used only if the release download fails - see :zip_update below.
-set "FALLBACK_ZIP_URL=https://codeload.github.com/darpantimsina72/fast-syncs/zip/refs/heads/main"
+set "FALLBACK_ZIP_URL=https://codeload.github.com/aniruddhajd/fast-syncs/zip/refs/heads/production"
 rem NO_DL is set when the new files could NOT be fetched, so the final
 rem message never claims an update that did not happen.
 set "NO_DL="
