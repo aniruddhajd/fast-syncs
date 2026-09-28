@@ -2212,8 +2212,44 @@ def _merge_short_groups(groups, u_durs, unit_row, min_s):
     return [tuple(x) for x in g]
 
 
+def _pause_cut(rms, lo, frame_ms, target, min_run=6, rel=0.12):
+    """v0.23.5: where to cut in a window of frame loudness values.
+
+    *rms* are consecutive frame_ms RMS values starting at *lo* (ms). A pause
+    is a run of >= min_run frames (60 ms at 10 ms frames) quieter than rel x
+    the window's speech level (90th percentile). The cut goes to the centre
+    of the pause nearest *target*; a longer pause wins over a slightly nearer
+    blip. Returns the cut in ms, or None when the window holds no real pause
+    (the caller then falls back to the quietest single frame)."""
+    if len(rms) < min_run:
+        return None
+    level = sorted(rms)[int(0.9 * (len(rms) - 1))]
+    if level <= 0:
+        return None
+    thr = level * rel
+    runs, start = [], None
+    for k, v in enumerate(list(rms) + [thr + 1]):     # sentinel closes a run
+        if v <= thr:
+            if start is None:
+                start = k
+        elif start is not None:
+            if k - start >= min_run:
+                runs.append((start, k))
+            start = None
+    if not runs:
+        return None
+
+    def centre(r):
+        return lo + ((r[0] + r[1]) * frame_ms) // 2
+
+    # Distance to the timestamp boundary, discounted by pause length.
+    best = min(runs, key=lambda r: abs(centre(r) - target)
+               - 2 * (r[1] - r[0]) * frame_ms)
+    return centre(best)
+
+
 def _snap_cuts(pl, tts_path, spans, search_ms=250, frame_ms=10,
-               apart_ms=1200):
+               apart_ms=1200, back_ms=300, ahead_ms=700):
     """v0.18.1: move each cut between neighbouring pieces to the quietest
     point near it, and make the neighbours share that cut.
 
@@ -2224,7 +2260,15 @@ def _snap_cuts(pl, tts_path, spans, search_ms=250, frame_ms=10,
     were clipped ("words are missing"). The quietest 10 ms frame within
     +-search_ms of the boundary is the gap between two words; cutting there
     and letting both pieces meet at it loses nothing. Pieces already far
-    apart (a request gap, real silence) are left alone."""
+    apart (a request gap, real silence) are left alone.
+
+    v0.23.5: the quietest single frame within +-250 ms was often a dip INSIDE
+    a word — eleven_v3's character times run early by more than that — so a
+    sentence's last word was split, its tail showing up as a stray blob at
+    the start of the next chunk. Now the cut goes into a real pause (see
+    _pause_cut) searched from back_ms before to ahead_ms after the boundary
+    (biased later, where the true end usually is); the old quietest-frame
+    rule is only the fallback when that window has no pause at all."""
     if not pl.PYDUB_AVAILABLE or len(spans) < 2:
         return spans, 0
     try:
@@ -2237,16 +2281,26 @@ def _snap_cuts(pl, tts_path, spans, search_ms=250, frame_ms=10,
         e_i, s_n = out[i][1], out[i + 1][0]
         if s_n - e_i > apart_ms or s_n < out[i][0]:
             continue
-        lo = max(out[i][0] + 40, min(e_i, s_n) - search_ms)
-        hi = min(out[i + 1][1] - 40, max(e_i, s_n) + search_ms)
-        if hi - lo < frame_ms:
-            cut = (e_i + s_n) // 2
-        else:
-            best, cut = None, (e_i + s_n) // 2
-            for pos in range(lo, hi - frame_ms + 1, frame_ms):
-                rms = audio[pos:pos + frame_ms].rms
-                if best is None or rms < best:
-                    best, cut = rms, pos + frame_ms // 2
+        target = (e_i + s_n) // 2
+        # A real pause first, in a wider window biased later.
+        plo = max(out[i][0] + 40, min(e_i, s_n) - back_ms)
+        phi = min(out[i + 1][1] - 40, max(e_i, s_n) + ahead_ms)
+        cut = None
+        if phi - plo >= 6 * frame_ms:
+            frames = [audio[pos:pos + frame_ms].rms
+                      for pos in range(plo, phi - frame_ms + 1, frame_ms)]
+            cut = _pause_cut(frames, plo, frame_ms, target)
+        if cut is None:
+            lo = max(out[i][0] + 40, min(e_i, s_n) - search_ms)
+            hi = min(out[i + 1][1] - 40, max(e_i, s_n) + search_ms)
+            if hi - lo < frame_ms:
+                cut = target
+            else:
+                best, cut = None, target
+                for pos in range(lo, hi - frame_ms + 1, frame_ms):
+                    rms = audio[pos:pos + frame_ms].rms
+                    if best is None or rms < best:
+                        best, cut = rms, pos + frame_ms // 2
         if cut != e_i or cut != s_n:
             snapped += 1
         out[i][1] = cut
