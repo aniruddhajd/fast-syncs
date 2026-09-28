@@ -12,7 +12,7 @@
 --                             (D_STARTOFFS = orig start, D_LENGTH = orig dur,
 --                              D_POSITION = synced start; cue text stored in
 --                              a hidden item ext state)
---   3. "Dub Rendered (ref)" - one item: final synced wav, position 0, MUTED
+--   (v0.23.2: the muted "Dub Rendered (ref)" track is no longer created)
 --
 -- v0.8: no project regions and no visible item notes -- the region lines and
 -- the note text painted over the arrange view and hid the waveforms. The
@@ -603,15 +603,11 @@ local function main()
     skip('synced_srt: file not found ("' .. synced_srt .. '")')
   end
 
-  local synced_wav = m.synced_wav or ""
-  if synced_wav ~= "" and not file_exists(synced_wav) then
-    skip('synced_wav: file not found ("' .. synced_wav .. '")')
-    synced_wav = ""
-  elseif synced_wav == "" then
-    skip("synced_wav: empty in manifest -- reference track skipped")
-  end
+  -- v0.23.2: no "Dub Rendered (ref)" track any more. The synced wav is still
+  -- written next to the run (and listed in the manifest) for anyone who wants
+  -- it, but importing it only added a muted duplicate of the Dub Chunks track.
 
-  if en_audio == "" and #entries == 0 and synced_wav == "" and #cues == 0 then
+  if en_audio == "" and #entries == 0 and #cues == 0 then
     reaper.ShowMessageBox(
       "Nothing to import -- every manifest field was empty or missing:\n\n- "
       .. table.concat(skipped, "\n- "),
@@ -688,14 +684,6 @@ local function main()
         end
       end
     end
-  end
-
-  -- 3. Dub Rendered (ref) -- muted reference track
-  if synced_wav ~= "" then
-    local tr = append_named_track(TRACK_REF .. suffix)
-    reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", 1)
-    local it = add_file_item(tr, synced_wav, 0, nil, 0, basename(synced_wav))
-    if not it then skip("synced_wav: REAPER could not open the media file") end
   end
 
   -- v0.8: no regions. One region per cue put a vertical line through every
