@@ -8278,6 +8278,39 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
     }, q)
   end
   V5.wrap_begin(ctx, 4)
+  -- v0.23.3: Translate — a fresh translation of the English spoken under this
+  -- chunk, sized to its slot. For a chunk whose line is wrong, not just long:
+  -- the other asks only edit what is already there. Needs the run's English
+  -- SRT (regen_en_under); without it there is nothing to translate from.
+  do
+    -- regen_en_under parses the whole SRT: once per chunk, not per frame.
+    local en_key = string.format('%s|%.3f|%.3f', _regen_out_dir, pos, slot)
+    if A.en_key ~= en_key then
+      A.en_key, A.en = en_key, V5.regen_en_under(pos, slot)
+    end
+    local en = A.en or ''
+    local lang = (_regen_lang ~= '' and _regen_lang) or LANGUAGE or 'the target language'
+    local label = 'Translate'
+    local w = V5.btn_w(ctx, label)
+    V5.wrap_next(ctx, w)
+    _ui_begin_disabled(ctx, busy or en == '')
+    if reaper.ImGui_Button(ctx, label .. '##rgtr', w, 0) and not busy
+       and en ~= '' then
+      ask('TRANSLATE: translate the ENGLISH line afresh into ' .. lang ..
+          ' for this dubbing slot. Use the current line only as context; do ' ..
+          'not just edit it. Give 2-3 natural, complete renderings sized to ' ..
+          'the speech slot, in the learned house style, keeping every name ' ..
+          'and number.')
+    end
+    _ui_end_disabled(ctx)
+    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, V5.wrap(en ~= ''
+        and ('Translate the English under this chunk again:\n"' ..
+             en:sub(1, 200) .. (#en > 200 and '…' or '') .. '"')
+        or 'No English found under this chunk (the run\'s English SRT is ' ..
+           'missing or the chunk is outside it).'))
+    end
+  end
   for k, q in ipairs(V5.ASSIST_QUICK) do
     local w = V5.btn_w(ctx, q[1])
     V5.wrap_next(ctx, w)
