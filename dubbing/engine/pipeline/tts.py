@@ -567,6 +567,50 @@ def _split_script_into_units_with_paras(text: str,
     return out, opar
 
 
+# v0.24.2: one slow reply used to kill a whole dub. A live 43-chunk Marathi
+# run died on chunk 29 with "TimeoutError: The read operation timed out" —
+# 28 chunks already paid for, nothing kept, because none of the ElevenLabs
+# voice requests retried. Transient failures (timeout, dropped connection,
+# 429, 5xx) now get _EL_ATTEMPTS tries with a short backoff; a real error
+# (bad key, unknown voice, bad request) still fails at once.
+_EL_ATTEMPTS = 3
+_EL_BACKOFF_SECS = (5, 15)
+_EL_RETRY_STATUS = (408, 429, 500, 502, 503, 504)
+
+
+def _el_read(req, timeout: float, status_cb=None) -> bytes:
+    """_urlopen(req).read() with retries for transient failures. HTTPError
+    that is not transient is re-raised untouched, so each caller's own error
+    messages (401/404/422...) still apply."""
+    import http.client
+    import socket
+    import time
+    for attempt in range(1, _EL_ATTEMPTS + 1):
+        try:
+            with _urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in _EL_RETRY_STATUS or attempt == _EL_ATTEMPTS:
+                raise
+            why = f"HTTP {e.code}"
+        except (TimeoutError, socket.timeout, ConnectionError,
+                http.client.HTTPException, urllib.error.URLError) as e:
+            if attempt == _EL_ATTEMPTS:
+                raise
+            why = type(e).__name__
+        wait = _EL_BACKOFF_SECS[min(attempt, len(_EL_BACKOFF_SECS)) - 1]
+        msg = (f"ElevenLabs did not answer ({why}) — retrying in {wait}s "
+               f"(attempt {attempt + 1} of {_EL_ATTEMPTS})…")
+        print("    [tts] " + msg, flush=True)
+        if status_cb:
+            try:
+                status_cb("TTS: " + msg)
+            except Exception:
+                pass
+        time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
 def _elevenlabs_tts_post(chunk: str, api_key: str, voice_id: str, model_id: str,
                          previous_text: str = None, next_text: str = None) -> bytes:
     """
@@ -605,8 +649,7 @@ def _elevenlabs_tts_post(chunk: str, api_key: str, voice_id: str, model_id: str,
         },
     )
     try:
-        with _urlopen(req, timeout=180) as resp:
-            return resp.read()
+        return _el_read(req, timeout=180)
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
@@ -631,6 +674,11 @@ def _elevenlabs_tts_post(chunk: str, api_key: str, voice_id: str, model_id: str,
         raise ValueError(f"ElevenLabs TTS error (HTTP {e.code}): {err_body}") from None
     except urllib.error.URLError as e:
         raise ValueError(f"Network error during ElevenLabs TTS: {e.reason}") from None
+    except (TimeoutError, ConnectionError) as e:
+        raise ValueError(
+            f"ElevenLabs did not answer after {_EL_ATTEMPTS} attempts "
+            f"({type(e).__name__}: {e}). The service or the connection is "
+            "slow right now — run the dub again in a few minutes.") from None
 
 
 def _output_locked(path: str) -> bool:
@@ -1101,8 +1149,7 @@ def _elevenlabs_tts_post_ts(chunk: str, api_key: str, voice_id: str,
         },
     )
     try:
-        with _urlopen(req, timeout=300) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = json.loads(_el_read(req, timeout=300).decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
@@ -1127,6 +1174,11 @@ def _elevenlabs_tts_post_ts(chunk: str, api_key: str, voice_id: str,
     except urllib.error.URLError as e:
         raise ValueError(
             f"Network error during ElevenLabs TTS: {e.reason}") from None
+    except (TimeoutError, ConnectionError) as e:
+        raise ValueError(
+            f"ElevenLabs did not answer after {_EL_ATTEMPTS} attempts "
+            f"({type(e).__name__}: {e}). The service or the connection is "
+            "slow right now — run the dub again in a few minutes.") from None
 
     audio = base64.b64decode(data.get("audio_base64") or "")
     align = data.get("alignment") or {}
@@ -1455,8 +1507,7 @@ def _elevenlabs_sts_post(audio_bytes: bytes, api_key: str, voice_id: str,
         },
     )
     try:
-        with _urlopen(req, timeout=600) as resp:
-            return resp.read()
+        return _el_read(req, timeout=600)
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
@@ -1481,6 +1532,11 @@ def _elevenlabs_sts_post(audio_bytes: bytes, api_key: str, voice_id: str,
         raise ValueError(
             f"Network error during ElevenLabs voice change: {e.reason}"
         ) from None
+    except (TimeoutError, ConnectionError) as e:
+        raise ValueError(
+            f"ElevenLabs did not answer after {_EL_ATTEMPTS} attempts "
+            f"({type(e).__name__}: {e}). The service or the connection is "
+            "slow right now — run the dub again in a few minutes.") from None
 
 
 def voice_change_elevenlabs(input_path: str, output_path: str, api_key: str,
