@@ -168,6 +168,25 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+27. **v0.25.0: "Prompt agents · test" — `--script-source prompt_agents`.**
+    The Prompt-chain files as an agent team, Lekhak bypassed, AI-mode sync.
+    - `pipeline/prompt_agents.py`: per page (the AI-mode English phrase
+      cues, `_pages`), in parallel: **Translator** = Step1 file + the
+      chain's own `=== Formatted SRT Content ===` block; **Reviewer** =
+      Step2 + English + draft; **Punctuator** = Step3 + the text. The full
+      prompt files are the cached static prefix, as in the chain.
+    - Supervisor = the free checks (`ai_checks.run_checks`): a failing
+      draft gets one retry with the check notes (kept only if no worse);
+      a Reviewer/Punctuator output is kept only if it fails no more checks
+      and passes `meaning_kept` (numbers, at least half the length).
+    - Rows are paired to the cues (`_pair_review_rows`) → `_ai_draft.json`
+      (`"mode": "ptest"`) → AI mode's anchor sync, unchanged. Report in
+      `_ai_report.txt`. No memory read, no learning, no house rules, no
+      Step4/emotion, no SyncingPrompt. Needs Step1-3 files (translate).
+    - Folder `<stem>_PTEST/` (files `<stem>_PTEST_*`), manifest
+      `"variant": "ptest"`, tracks `... [PTEST]`; Learn from final dub
+      refused. Tests: `test_prompt_agents.py` (6).
+
 26. **v0.24.0: "AI · test rules" — `--script-source ai_test`.** A testing
     mode for prompt-mode knowledge inside AI mode, isolated from Prompt chain
     and AI · learns (both unchanged; with the flag off the AI prompt is

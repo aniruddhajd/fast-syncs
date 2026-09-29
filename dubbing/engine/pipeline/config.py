@@ -646,7 +646,8 @@ def _prepare_output_dir(audio_path: str) -> str:
     # v0.24: the audio is the copy inside an "AI · test rules" <base>_TEST
     # folder — a normal run belongs in the ordinary <base> folder beside it,
     # never inside the test folder.
-    if os.path.basename(src_dir) == base_name + "_TEST":
+    if os.path.basename(src_dir) in (base_name + "_TEST",
+                                     base_name + "_PTEST"):
         src_dir = os.path.dirname(src_dir)
     out_dir   = os.path.join(src_dir, base_name)
     try:

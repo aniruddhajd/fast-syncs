@@ -686,18 +686,30 @@ local VC_VOICE_ID = ""            -- v0.4: target voice for track voice change
 -- (never learns), results in <audio>_TEST. Everything that treats AI mode
 -- specially asks V5.is_ai_mode(); runs are told apart by their folder.
 function V5.is_ai_mode()
+  -- v0.25: "Prompt agents · test" also uses AI mode's sync (anchor sync).
   return SCRIPT_MODE == 'ai' or SCRIPT_MODE == 'ai_test'
+         or SCRIPT_MODE == 'prompt_agents'
 end
 
+-- Any test run's folder: <audio>_TEST (AI · test rules) or <audio>_PTEST
+-- (Prompt agents). Test runs never learn.
 function V5.is_test_dir(dir)
-  return type(dir) == 'string'
-         and dir:gsub('[\\/]+$', ''):match('_TEST$') ~= nil
+  if type(dir) ~= 'string' then return false end
+  return dir:gsub('[\\/]+$', ''):match('_P?TEST$') ~= nil
+end
+
+-- Only AI · test rules (_TEST, not _PTEST) carries the house rules into
+-- the assistant and fit suggestions.
+function V5.is_rules_dir(dir)
+  if type(dir) ~= 'string' then return false end
+  return dir:gsub('[\\/]+$', ''):match('_TEST$') ~= nil
 end
 
 function V5.script_mode_label()
   if SCRIPT_MODE == 'have' then return 'your script' end
   if SCRIPT_MODE == 'ai' then return 'AI · self-learning' end
   if SCRIPT_MODE == 'ai_test' then return 'AI · test rules' end
+  if SCRIPT_MODE == 'prompt_agents' then return 'Prompt agents · test' end
   if SCRIPT_MODE == 'eleven' then return 'ElevenLabs Dub' end
   return 'prompt chain'
 end
@@ -827,7 +839,7 @@ local function load_settings()
   v = jval("vc_voice_id") if v then VC_VOICE_ID = v end
   v = jval("script_mode")
   if v == "auto" or v == "have" or v == "ai" or v == "ai_test"
-     or v == "eleven" then
+     or v == "prompt_agents" or v == "eleven" then
     SCRIPT_MODE = v
   end
   local b = json_field(content, "full_run")
@@ -3532,7 +3544,8 @@ local function import_to_timeline(m)
 
   -- v0.24: a test run ("AI · test rules") imports as [TEST] tracks beside
   -- the normal dub, so the two can be compared on one timeline.
-  local tag = (m.variant == "test") and " [TEST]" or ""
+  local tag = (m.variant == "test") and " [TEST]"
+              or (m.variant == "ptest") and " [PTEST]" or ""
   local suffix = tag .. fresh_name_suffix(tag)
   local chunks_added, notes_matched = 0, 0
 
@@ -3738,6 +3751,7 @@ local function build_engine_cmd(py, opts)
   -- v0.18 AI mode / v0.22 ElevenLabs Dub: a fixed ASCII token, never user
   -- text.
   if opts.script_source == 'ai' or opts.script_source == 'ai_test'
+     or opts.script_source == 'prompt_agents'
      or opts.script_source == 'eleven' then
     parts[#parts + 1] = '--script-source'
     parts[#parts + 1] = opts.script_source
@@ -4965,7 +4979,7 @@ function V5.suggest_request(R, indices)
   local lang = (R.lang or '') ~= '' and R.lang or LANGUAGE
   local cmd = build_engine_cmd(py, { suggest_fit = true, text_file = path,
                                      language = lang,
-                                     script_source = V5.is_test_dir(out_dir)
+                                     script_source = V5.is_rules_dir(out_dir)
                                                      and 'ai_test' or nil })
   V5.suggest_rows = indices
   return launch_engine(cmd, "suggest", {
@@ -5015,7 +5029,7 @@ function V5.assist_launch(t, ask)
   local cmd = build_engine_cmd(py, { review_assist = true, text_file = path,
                                      language = (t.lang or '') ~= '' and t.lang
                                                 or LANGUAGE,
-                                     script_source = V5.is_test_dir(t.out_dir)
+                                     script_source = V5.is_rules_dir(t.out_dir)
                                                      and 'ai_test' or nil })
   if t.history then table.insert(t.history, { role = 'user', text = ask }) end
   V5.assist_target = t.target
@@ -5985,6 +5999,7 @@ function V5.history_record(status, m)
     mode     = (SCRIPT_MODE == "have") and "paste"
                or (SCRIPT_MODE == "ai") and "ai"
                or (SCRIPT_MODE == "ai_test") and "ai_test"
+               or (SCRIPT_MODE == "prompt_agents") and "prompt_agents"
                or (SCRIPT_MODE == "eleven") and "eleven" or "full",
     audio    = (m.audio ~= "" and m.audio) or LAST_AUDIO or "",
     language = (m.language ~= "" and m.language) or LANGUAGE or "",
@@ -8416,7 +8431,7 @@ function V5.learn_final_chip(ctx)
   _ui_begin_disabled(ctx, not can)
   if V5.chip(ctx, (V5.quiet_job == "learnf" and '… Learning' or
                    '✦ Learn from final dub') .. '##learnfinal',
-             test and ('This is an "AI · test rules" run (a _TEST folder). ' ..
+             test and ('This is a test run (a _TEST / _PTEST folder). ' ..
                        'Test runs never teach AI mode.') or
              'Teach AI mode from the dub as it is on the timeline now — ' ..
              'including every line you regenerated after the review. ' ..
@@ -13485,6 +13500,14 @@ function V5.ui_source_inputs(ctx)
       'teaches it anything, and saves everything to <audio>_TEST, so your ' ..
       'normal AI and Prompt chain results for the same audio are never ' ..
       'touched. Imported tracks are marked [TEST].' },
+    { 'prompt_agents', 'Prompt agents · test',
+      'Your hand-written Prompt-chain files as a team of three agents: ' ..
+      'Translator (Step 1), Reviewer (Step 2) and Punctuator (Step 3) ' ..
+      'work page by page, with free checks between them (numbers kept, ' ..
+      'nothing dropped, fits the timing) and one retry for a failing ' ..
+      'draft. The Lekhak AI team, memory and learning are NOT used; the ' ..
+      'sync is AI mode anchor sync. Learns nothing, saves to ' ..
+      '<audio>_PTEST, tracks marked [PTEST].' },
     { 'eleven', 'ElevenLabs Dub',
       'ElevenLabs Dubbing Studio does the whole job: it transcribes, finds ' ..
       'the speakers, translates and voices. The run stops so you can edit ' ..
@@ -13599,6 +13622,14 @@ function V5.ui_source_inputs(ctx)
       end
       -- v0.18: say where the learning happens, because it only happens on
       -- an approved review: a straight-through run teaches it nothing.
+      if SCRIPT_MODE == 'prompt_agents' then
+        reaper.ImGui_Dummy(ctx, 0, 6)
+        reaper.ImGui_TextWrapped(ctx,
+          'Test mode: your Prompt-chain files run as Translator -> ' ..
+          'Reviewer -> Punctuator agents with checks between them; the ' ..
+          'Lekhak AI team is bypassed and nothing is learned. Files go to ' ..
+          '<audio>_PTEST; tracks import as [PTEST].')
+      end
       if SCRIPT_MODE == 'ai_test' then
         reaper.ImGui_Dummy(ctx, 0, 6)
         reaper.ImGui_TextWrapped(ctx,

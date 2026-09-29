@@ -621,7 +621,8 @@ local function main()
   reaper.PreventUIRefresh(1)
 
   -- v0.24: an "AI · test rules" run imports as [TEST] tracks.
-  local tag = (m.variant == "test") and " [TEST]" or ""
+  local tag = (m.variant == "test") and " [TEST]"
+              or (m.variant == "ptest") and " [PTEST]" or ""
   local suffix = tag .. fresh_name_suffix(tag)
   local chunks_added, notes_matched = 0, 0
 

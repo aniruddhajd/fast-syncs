@@ -354,7 +354,7 @@ def _parse_args(argv):
                          "LLM translation chain (S2a-S2c) in --steps "
                          "translate/full runs")
     ap.add_argument("--script-source", dest="script_source",
-                    default="prompt", choices=["prompt", "ai", "ai_test", "eleven"],
+                    default="prompt", choices=["prompt", "ai", "ai_test", "prompt_agents", "eleven"],
                     help="v0.18: 'ai' = the Lekhak agentic translator "
                          "instead of the Step1-3 prompt chain (and, with "
                          "--steps dub, learn from the reviewed script). "
@@ -591,7 +591,8 @@ def main(argv=None) -> int:
                 cmd += ["--provided-script", args.provided_script]
             if args.plan:
                 cmd += ["--plan", args.plan]
-            if args.script_source in ("ai", "ai_test", "eleven"):
+            if args.script_source in ("ai", "ai_test", "prompt_agents",
+                                      "eleven"):
                 cmd += ["--script-source", args.script_source]
             if args.sync_mode:
                 cmd += ["--sync-mode", args.sync_mode]
