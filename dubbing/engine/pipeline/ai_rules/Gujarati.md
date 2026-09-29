@@ -1,0 +1,12 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Gujarati (બોલચાલ), not ગ્રંથભાષા/literary.
+- Sentence end is Western full stop `.` (NOT `।`); mid-flow replace it with `;` or `-` while the thought continues. Point ending non-grammatically: `!` instead of `.`.
+- Drop the pronoun when the verb ending carries person/honorific; address with તમે; spell સદ્‌ગુરુ.
+- Bolchal forms: કરી રહ્યો છું→કરું છું, થઈ ગયું છે→થઈ ગ્યું; એટલે/તેથી not અતઃ; જીવનની નિશાની→જીવન-નિશાની.
+- Direct quote: verb after the quote: "<quote>" - એમ પૂછે છે.
+- Pairs: Dimension→પરિમાણ, isn't it?→નહીં?
+- ✗ તમે જાણો છો કે → ✓ ખબર છે ને (spoken tag, shorter)
+- ✗ સાચું કહું તો → ✓ મૂળભૂત રીતે (essentially, not contradiction)
+- ✗ યોગી માને છે → ✓ યોગી તરીકે જોતા હોવા છતાં ('known to be' exactly)
+- ✗ તકલીફ પામે → ✓ પીડા ઊઠાવે (physical pain ≠ suffering)
+- ✗ પ્રચંડતા → ✓ તીવ્રતા (intense in this context)

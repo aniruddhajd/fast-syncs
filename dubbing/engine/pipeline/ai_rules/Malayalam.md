@@ -1,0 +1,13 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Malayalam (സംഭാഷണ ഭാഷ), never formal-literary (ഗ്രന്ഥഭാഷ).
+- Sentence end: Western full stop `.`, never `।`. Mid-flow, drop `.`: use `;` if the argument continues, `-` if the same image/statement continues.
+- End a trailing, non-grammatical point with `!` instead of `.`: `ശ്രദ്ധിക്കണം - ആര് എന്ത് പറയുന്നു!`
+- Drop repeated pronouns; Malayalam verb endings carry person/honorific.
+- Quotes: subject, quote, saying-verb last (`"<quote>" എന്ന് ചോദിക്കുന്നു.`).
+- Use spoken sandhi/contractions: അത് ആണ് → അതാണ്, ആകുന്നില്ല → ആകില്ല.
+- ✗ ഭീകരത → ✓ തീവ്രത (intense, not terrifying)
+- ✗ കരുതുന്നു → ✓ കണ്ടാലും ("known to be", not "think")
+- ✗ സത്യം പറഞ്ഞാൽ → ✓ മൗലികമായി (essentially; not contradiction)
+- ✗ തദ്ഫലമായി → ✓ അതുകൊണ്ട് (spoken, not formal connector)
+- ✗ നിങ്ങൾക്ക് അറിയാമോ → ✓ അറിയാലോ (short spoken "you know")
+- ✗ സംഭവിച്ചിരിക്കണം → ✓ സംഭവിച്ചിട്ടുണ്ടാകും (natural spoken certainty)

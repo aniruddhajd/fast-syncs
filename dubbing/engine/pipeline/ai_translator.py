@@ -68,6 +68,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from .ai_agents import proof_pages, run_critic_panel
 from .ai_checks import fail_count, has_failure, risk_score, run_checks, terms_in
 from .ai_lang import glossary_directive, honorific_directive, translit_directive
+from .ai_lang import house_rules as _house_rules_text
 from .ai_memory import AiMemory
 from .config import (DATA_DIR, DEFAULT_CHARS_PER_SEC, GEMINI_DEFAULT_MODEL,
                      LANG_CHARS_PER_SEC)
@@ -243,7 +244,8 @@ _OUTPUT_RULES = """OUTPUT FORMAT — JSON only:
 
 
 def build_static_prefix(language: str, prof: dict,
-                        output_rules: bool = True) -> str:
+                        output_rules: bool = True,
+                        house_rules: bool = False) -> str:
     """The invariant part of every request (lekhak systemPrefix): identical
     for every batch of a run, placed first so prompt caching hits."""
     parts = [_PRINCIPLES.format(lang=language,
@@ -274,6 +276,13 @@ def build_static_prefix(language: str, prof: dict,
                                    f"AI draft (rejected): {c['draft']}\n"
                                    f"Human final (approved): {c['final']}"
                                    for c in corr[-PROMPT_CORRECTIONS:]))
+    # v0.24 "AI · test rules": the prompt-mode house rules come LAST, so they
+    # win over the learned patterns and corrections above (user's choice).
+    rules = _house_rules_text(language) if house_rules else ""
+    if rules:
+        parts.append("HOUSE DUBBING RULES — these override the learned "
+                     "patterns and corrections above wherever they "
+                     "conflict:\n" + rules)
     if output_rules:
         parts.append(_OUTPUT_RULES.replace("LANG", language))
     return "\n\n".join(parts) + "\n"
@@ -616,6 +625,7 @@ def ai_translate_script(en_entries: List[Tuple[float, float, str]],
     audit_rate = float(opt.get("audit_rate", AI_AUDIT_RATE))
     use_proofer = bool(opt.get("proofer", True))
     concurrency = max(1, int(opt.get("concurrency", AI_CONCURRENCY)))
+    hr = bool(opt.get("house_rules", False))     # v0.24 "AI · test rules"
 
     cues = [(i + 1, float(s0), float(s1), (t or "").strip())
             for i, (s0, s1, t) in enumerate(en_entries) if (t or "").strip()]
@@ -636,7 +646,7 @@ def ai_translate_script(en_entries: List[Tuple[float, float, str]],
     # its LENGTH band from memory the same way); None until 30 samples.
     rs = [len(tr) / len(en) for en, tr in pairs if len(en or "") > 40 and tr]
     exp_ratio = (sum(rs) / len(rs)) if len(rs) >= 30 else None
-    static = build_static_prefix(language, prof)
+    static = build_static_prefix(language, prof, house_rules=hr)
     say(f"Learned profile: {profile_summary(prof)}; memory: {len(memory)} "
         f"approved pair(s); glossary: {len(glossary)} term(s).")
 
@@ -768,7 +778,8 @@ def ai_translate_script(en_entries: List[Tuple[float, float, str]],
             o = outcomes[p["idx"]]
             try:
                 return p["idx"], run_critic_panel(
-                    o["source"], o["text"], language, guidelines, prof, model)
+                    o["source"], o["text"], language, guidelines, prof, model,
+                    house_rules=hr)
             except Exception as e:                   # noqa: BLE001
                 return p["idx"], {"error": str(e)[:200]}
 
@@ -800,7 +811,7 @@ def ai_translate_script(en_entries: List[Tuple[float, float, str]],
         if items:
             say(f"Proofer: reading {len(items)} page(s)…")
             found = proof_pages(items, language, guidelines, prof, model,
-                                status_cb=say)
+                                status_cb=say, house_rules=hr)
             for i, findings in found.items():
                 if not findings:
                     continue
@@ -887,7 +898,8 @@ _PARTIAL_EN_NOTE = (
 
 
 def fit_to_seconds(english: str, current: str, seconds: float,
-                   language: str, model: str = GEMINI_DEFAULT_MODEL) -> str:
+                   language: str, model: str = GEMINI_DEFAULT_MODEL,
+                   house_rules: bool = False) -> str:
     """Anchor sync's targeted retry (Lekhak's repair idea applied to
     timing): rewrite ONE line so it can be spoken in *seconds*, keeping its
     meaning, in the learned house voice. Returns the new line, or "" when
@@ -906,7 +918,8 @@ def fit_to_seconds(english: str, current: str, seconds: float,
         data = _parse_json_reply(_llm_generate(
             prompt, model,
             static_prefix=build_static_prefix(language, prof,
-                                              output_rules=False),
+                                              output_rules=False,
+                                              house_rules=house_rules),
             role="translate", temperature=0.3))
         text = str((data or {}).get("text") or "").strip() \
             if isinstance(data, dict) else ""
@@ -918,7 +931,7 @@ def fit_to_seconds(english: str, current: str, seconds: float,
 
 def suggest_fits(english: str, current: str, speech_s: float, hard_s: float,
                  language: str, model: str = GEMINI_DEFAULT_MODEL,
-                 n: int = 2) -> List[str]:
+                 n: int = 2, house_rules: bool = False) -> List[str]:
     """Review-screen fit suggestions: up to *n* shorter renderings of one
     line, aimed at its speech slot (*speech_s*: how long the English
     speaker talks) and never past its hard slot (*hard_s*: that plus the
@@ -944,7 +957,8 @@ def suggest_fits(english: str, current: str, speech_s: float, hard_s: float,
         data = _parse_json_reply(_llm_generate(
             prompt, model,
             static_prefix=build_static_prefix(language, prof,
-                                              output_rules=False),
+                                              output_rules=False,
+                                              house_rules=house_rules),
             role="translate", temperature=0.5))
     except Exception:                                # noqa: BLE001
         return []
@@ -1017,7 +1031,8 @@ ASSIST_SPEED_MIN, ASSIST_SPEED_MAX = 0.80, 1.25
 def review_assist(english: str, current: str, speech_s: float, hard_s: float,
                   instruction: str, language: str, history=(),
                   prev_line: str = "", next_line: str = "",
-                  model: str = GEMINI_DEFAULT_MODEL) -> dict:
+                  model: str = GEMINI_DEFAULT_MODEL,
+                  house_rules: bool = False) -> dict:
     """The review screen's assistant for ONE line: follows the reviewer's
     instruction (shorter / longer / speed up / slow down / more formal /
     alternatives ...) in the learned house voice. No prompt files.
@@ -1071,7 +1086,8 @@ def review_assist(english: str, current: str, speech_s: float, hard_s: float,
         data = _parse_json_reply(_llm_generate(
             prompt, model,
             static_prefix=build_static_prefix(language, load_profile(language),
-                                              output_rules=False),
+                                              output_rules=False,
+                                              house_rules=house_rules),
             role="translate", temperature=0.5))
     except Exception as e:                           # noqa: BLE001
         out["reply"] = f"The assistant could not answer ({str(e)[:120]})."

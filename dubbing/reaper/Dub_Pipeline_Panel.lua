@@ -682,9 +682,22 @@ local VC_VOICE_ID = ""            -- v0.4: target voice for track voice change
 -- v0.18: one place that names the script source for every summary line.
 -- "AI" alone used to mean the prompt chain; now it is its own mode, so the
 -- prompt chain is called what it is. (V5 table member — 200-locals limit.)
+-- v0.24 "AI · test rules": AI mode + the prompt-mode house rules, read-only
+-- (never learns), results in <audio>_TEST. Everything that treats AI mode
+-- specially asks V5.is_ai_mode(); runs are told apart by their folder.
+function V5.is_ai_mode()
+  return SCRIPT_MODE == 'ai' or SCRIPT_MODE == 'ai_test'
+end
+
+function V5.is_test_dir(dir)
+  return type(dir) == 'string'
+         and dir:gsub('[\\/]+$', ''):match('_TEST$') ~= nil
+end
+
 function V5.script_mode_label()
   if SCRIPT_MODE == 'have' then return 'your script' end
   if SCRIPT_MODE == 'ai' then return 'AI · self-learning' end
+  if SCRIPT_MODE == 'ai_test' then return 'AI · test rules' end
   if SCRIPT_MODE == 'eleven' then return 'ElevenLabs Dub' end
   return 'prompt chain'
 end
@@ -813,7 +826,8 @@ local function load_settings()
   v = jval("last_audio")  if v then LAST_AUDIO = v end
   v = jval("vc_voice_id") if v then VC_VOICE_ID = v end
   v = jval("script_mode")
-  if v == "auto" or v == "have" or v == "ai" or v == "eleven" then
+  if v == "auto" or v == "have" or v == "ai" or v == "ai_test"
+     or v == "eleven" then
     SCRIPT_MODE = v
   end
   local b = json_field(content, "full_run")
@@ -3032,7 +3046,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local MANIFEST_KEYS = {
-  "status", "error", "audio", "language", "out_dir",
+  "status", "error", "variant", "audio", "language", "out_dir",
   "en_audio", "en_srt", "tts_wav", "timestamps_txt",
   "synced_wav", "synced_srt",
   -- v0.2: review manifest ("status":"review") and regen manifest fields.
@@ -3357,7 +3371,8 @@ end
 
 -- Never reuse an existing same-named track: find the smallest suffix
 -- (" 2", " 3", ...) free for ALL THREE names at once ("" first import).
-local function fresh_name_suffix()
+local function fresh_name_suffix(tag)
+  tag = tag or ""
   local existing = {}
   for i = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, i)
@@ -3367,9 +3382,9 @@ local function fresh_name_suffix()
   local n = 1
   while n < 1000 do
     local suffix = (n == 1) and "" or (" " .. n)
-    if not (existing[TRACK_EN .. suffix]
-            or existing[TRACK_CHUNKS .. suffix]
-            or existing[TRACK_REF .. suffix]) then
+    if not (existing[TRACK_EN .. tag .. suffix]
+            or existing[TRACK_CHUNKS .. tag .. suffix]
+            or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
     n = n + 1
@@ -3515,7 +3530,10 @@ local function import_to_timeline(m)
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
 
-  local suffix = fresh_name_suffix()
+  -- v0.24: a test run ("AI · test rules") imports as [TEST] tracks beside
+  -- the normal dub, so the two can be compared on one timeline.
+  local tag = (m.variant == "test") and " [TEST]" or ""
+  local suffix = tag .. fresh_name_suffix(tag)
   local chunks_added, notes_matched = 0, 0
 
   -- 1. EN Original
@@ -3564,7 +3582,7 @@ local function import_to_timeline(m)
     end
 
     if #unsync_entries > 0 then
-      local tr = V5.find_or_append_track(V5.TRACK_UNSYNC)
+      local tr = V5.find_or_append_track(V5.TRACK_UNSYNC .. tag)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
@@ -3719,7 +3737,8 @@ local function build_engine_cmd(py, opts)
   end
   -- v0.18 AI mode / v0.22 ElevenLabs Dub: a fixed ASCII token, never user
   -- text.
-  if opts.script_source == 'ai' or opts.script_source == 'eleven' then
+  if opts.script_source == 'ai' or opts.script_source == 'ai_test'
+     or opts.script_source == 'eleven' then
     parts[#parts + 1] = '--script-source'
     parts[#parts + 1] = opts.script_source
   end
@@ -4774,7 +4793,7 @@ local function start_dub_run()
   local cmd = build_engine_cmd(py, {
     audio = audio, language = LANGUAGE, steps = steps,
     provided_script = provided_path,
-    script_source = (SCRIPT_MODE == "ai" or SCRIPT_MODE == "eleven")
+    script_source = (V5.is_ai_mode() or SCRIPT_MODE == "eleven")
                     and SCRIPT_MODE or nil,
   })
   local header = {
@@ -4945,7 +4964,9 @@ function V5.suggest_request(R, indices)
   if not py then return false end
   local lang = (R.lang or '') ~= '' and R.lang or LANGUAGE
   local cmd = build_engine_cmd(py, { suggest_fit = true, text_file = path,
-                                     language = lang })
+                                     language = lang,
+                                     script_source = V5.is_test_dir(out_dir)
+                                                     and 'ai_test' or nil })
   V5.suggest_rows = indices
   return launch_engine(cmd, "suggest", {
     "[panel] Python : " .. py,
@@ -4993,7 +5014,9 @@ function V5.assist_launch(t, ask)
   if not py then return false end
   local cmd = build_engine_cmd(py, { review_assist = true, text_file = path,
                                      language = (t.lang or '') ~= '' and t.lang
-                                                or LANGUAGE })
+                                                or LANGUAGE,
+                                     script_source = V5.is_test_dir(t.out_dir)
+                                                     and 'ai_test' or nil })
   if t.history then table.insert(t.history, { role = 'user', text = ask }) end
   V5.assist_target = t.target
   return launch_engine(cmd, "assist", {
@@ -5961,6 +5984,7 @@ function V5.history_record(status, m)
     ts       = os.date("%Y-%m-%d %H:%M"),
     mode     = (SCRIPT_MODE == "have") and "paste"
                or (SCRIPT_MODE == "ai") and "ai"
+               or (SCRIPT_MODE == "ai_test") and "ai_test"
                or (SCRIPT_MODE == "eleven") and "eleven" or "full",
     audio    = (m.audio ~= "" and m.audio) or LAST_AUDIO or "",
     language = (m.language ~= "" and m.language) or LANGUAGE or "",
@@ -6565,7 +6589,7 @@ local function launch_dub_continue(script_path)
   local cmd = build_engine_cmd(py, {
     audio = audio, language = lang, steps = "dub", script = script_path,
     voice_id = voice,
-    script_source = (SCRIPT_MODE == "ai" or SCRIPT_MODE == "eleven")
+    script_source = (V5.is_ai_mode() or SCRIPT_MODE == "eleven")
                     and SCRIPT_MODE or nil,
   })
   local log = {
@@ -8084,7 +8108,9 @@ function V5.final_dub_rows()
   for t = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, t)
     local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
-    if tr ~= src_tr and nm == V5.TRACK_UNSYNC then add_items(tr, true) end
+    if tr ~= src_tr and nm:sub(1, #V5.TRACK_UNSYNC) == V5.TRACK_UNSYNC then
+      add_items(tr, true)
+    end
   end
   table.sort(rows, function(a, b) return a.pos < b.pos end)
   return rows
@@ -8385,10 +8411,13 @@ end
 -- screen; disabled while the engine is busy or no run folder is known.
 function V5.learn_final_chip(ctx)
   local busy = V5.busy()
-  local can = _regen_out_dir ~= "" and not busy
+  local test = V5.is_test_dir(_regen_out_dir)
+  local can = _regen_out_dir ~= "" and not busy and not test
   _ui_begin_disabled(ctx, not can)
   if V5.chip(ctx, (V5.quiet_job == "learnf" and '… Learning' or
                    '✦ Learn from final dub') .. '##learnfinal',
+             test and ('This is an "AI · test rules" run (a _TEST folder). ' ..
+                       'Test runs never teach AI mode.') or
              'Teach AI mode from the dub as it is on the timeline now — ' ..
              'including every line you regenerated after the review. ' ..
              'Stores the lines in the translation memory and updates the ' ..
@@ -13448,6 +13477,14 @@ function V5.ui_source_inputs(ctx)
       'look at (<audio>_ai_report.txt). When you approve a reviewed script ' ..
       'it learns from your edits. Sync works exactly as in Prompt chain. ' ..
       'Use "Pause to check" so it can learn.' },
+    { 'ai_test', 'AI · test rules',
+      'A safe place to try new translation rules. Same AI team as ' ..
+      '"AI · learns" plus the prompt-mode house rules (holistic mapping, ' ..
+      'pause and punctuation rules, the review checklist), which win over ' ..
+      'the learned style. It USES what AI mode has learned but never ' ..
+      'teaches it anything, and saves everything to <audio>_TEST, so your ' ..
+      'normal AI and Prompt chain results for the same audio are never ' ..
+      'touched. Imported tracks are marked [TEST].' },
     { 'eleven', 'ElevenLabs Dub',
       'ElevenLabs Dubbing Studio does the whole job: it transcribes, finds ' ..
       'the speakers, translates and voices. The run stops so you can edit ' ..
@@ -13562,6 +13599,14 @@ function V5.ui_source_inputs(ctx)
       end
       -- v0.18: say where the learning happens, because it only happens on
       -- an approved review: a straight-through run teaches it nothing.
+      if SCRIPT_MODE == 'ai_test' then
+        reaper.ImGui_Dummy(ctx, 0, 6)
+        reaper.ImGui_TextWrapped(ctx,
+          'Test mode: the prompt-mode house rules are ON and win over the ' ..
+          'learned style. Nothing is learned from this run, and all files ' ..
+          'go to <audio>_TEST; tracks import as [TEST] beside your normal ' ..
+          'dub for comparison.')
+      end
       if SCRIPT_MODE == 'ai' then
         reaper.ImGui_Dummy(ctx, 0, 6)
         reaper.ImGui_TextWrapped(ctx, FULL_RUN
@@ -13777,7 +13822,7 @@ function V5.console_inspector(ctx)
   if SCRIPT_MODE == 'eleven' then
     V5.kv(ctx, 'Sync', 'ElevenLabs (per segment)')
   else
-    V5.kv(ctx, 'Sync', (SCRIPT_MODE == 'ai' and 'anchor'
+    V5.kv(ctx, 'Sync', (V5.is_ai_mode() and 'anchor'
                         or tostring(V5.sync_mode)) .. ' · ' .. tostring(V5.chunk_mode))
   end
 

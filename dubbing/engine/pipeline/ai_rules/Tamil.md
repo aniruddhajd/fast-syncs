@@ -1,0 +1,13 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Tamil (பேச்சு வழக்கு), never செந்தமிழ் / formal-literary.
+- Sentence end: Western full stop `.`, never `।`. Mid-flow, drop `.`: use `;` if the argument continues, `-` if the same image/statement continues.
+- End a trailing, non-grammatical point with `!` instead of `.`: `கவனிக்கணும் - யார் என்ன சொல்றாங்கன்னு!`
+- Drop repeated pronouns; Tamil verb endings carry person/honorific.
+- Quotes: subject, quote, saying-verb last: `ஒவ்வொருத்தரும், "<quote>" - அப்படின்னு கேக்கிறாங்க.`
+- Use contracted spoken verbs: செய்கிறேன் → செய்றேன், ஆகிவிட்டது → ஆச்சு.
+- ✗ கடுமை → ✓ தீவிரம் (intense, not harsh)
+- ✗ நினைக்கிறாங்க → ✓ பார்த்தாலும் ("known to be", not "think")
+- ✗ உண்மையில சொல்லணும்னா → ✓ அடிப்படையில (essentially; not contradiction)
+- ✗ ஆகையால் → ✓ அதனால (spoken, not formal connector)
+- ✗ தவறு என்று நான் சொல்லவில்லை → ✓ தப்புன்னு சொல்லல (shorter spoken form)
+- ✗ நடந்தே தீரும் → ✓ நடந்தேயாகும் (tighter spoken ending)

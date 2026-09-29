@@ -1,0 +1,12 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Hindi (खड़ीबोली, बोलचाल), not शुद्ध/literary.
+- Sentence end `।`; mid-flow replace it with `;` or `-` while the thought continues. Point ending non-grammatically: `!` instead of `।`.
+- Drop the pronoun when the verb ending carries person/honorific; address with आप; spell सद्‌गुरु.
+- Spoken forms: कर रहा हूँ→कर रहा, कर के→करके, जीवन का संकेत→जीवन-संकेत, इसलिए not अतः.
+- Direct quote: verb after the quote: "<quote>" - ऐसा कहकर पूछ रहे हैं।
+- Pairs: Dimension→आयाम, isn't it?→है ना?
+- ✗ क्या आप जानते हैं → ✓ जानते हैं ना (spoken tag, shorter)
+- ✗ सच कहूँ तो → ✓ मूलतः (essentially, not contradiction)
+- ✗ योगी मानते हैं → ✓ योगी के रूप में देखते हैं ('known to be' exactly)
+- ✗ उन्हें तकलीफ होती है → ✓ उन्हें दर्द होता है (physical pain ≠ suffering)
+- ✗ प्रचंडता → ✓ तीव्रता (intense in this context)

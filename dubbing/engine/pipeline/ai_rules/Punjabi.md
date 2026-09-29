@@ -1,0 +1,12 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Punjabi (ਬੋਲਚਾਲ, Majhi), not ਸ਼ੁੱਧ/literary. Gurmukhi script.
+- Sentence end `।`; mid-flow replace it with `;` or `-` while the thought continues. Point ending non-grammatically: `!` instead of `।`.
+- Drop the pronoun when the verb ending carries person/honorific; address with ਤੁਸੀਂ; spell ਸਦਗੁਰੂ.
+- Spoken forms: ਕਰ ਰਿਹਾ ਹਾਂ→ਕਰ ਰਿਹਾ, ਹੋ ਗਿਆ ਹੈ→ਹੋ ਗਿਆ, ਕਰ ਕੇ→ਕਰਕੇ; ਇਸ ਲਈ not ਅਤਃ; ਜੀਵਨ ਦਾ ਸੰਕੇਤ→ਜੀਵਨ-ਸੰਕੇਤ.
+- Direct quote: verb after the quote: "<quote>" - ਇੰਝ ਕਹਿ ਕੇ ਪੁੱਛ ਰਹੇ ਹਨ।
+- Pairs: Dimension→ਆਯਾਮ, isn't it?→ਹੈ ਨਾ?
+- ✗ ਕੀ ਤੁਸੀਂ ਜਾਣਦੇ ਹੋ → ✓ ਜਾਣਦੇ ਹੋ ਨਾ (spoken tag, shorter)
+- ✗ ਸੱਚ ਕਹਾਂ ਤਾਂ → ✓ ਮੂਲ ਰੂਪ ਵਿੱਚ (essentially, not contradiction)
+- ✗ ਯੋਗੀ ਮੰਨਦੇ ਹਨ → ✓ ਯੋਗੀ ਦੇ ਰੂਪ ਵਿੱਚ ਵੇਖਦੇ ਹਨ ('known to be' exactly)
+- ✗ ਤਕਲੀਫ਼ ਹੁੰਦੀ ਹੈ → ✓ ਦਰਦ ਹੁੰਦਾ ਹੈ (physical pain ≠ suffering)
+- ✗ ਪ੍ਰਚੰਡਤਾ → ✓ ਤੀਬਰਤਾ (intense in this context)

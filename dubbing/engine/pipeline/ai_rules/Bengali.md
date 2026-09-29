@@ -1,0 +1,12 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: চলিত ভাষা (cholito, spoken Bengali), never সাধু/literary.
+- Sentence end `।`; mid-flow replace it with `;` or `-` while the thought continues. Point ending non-grammatically: `!` instead of `।`.
+- Drop the pronoun when the verb ending carries person/honorific; address with আপনি; spell সদ্‌গুরু.
+- Cholito forms: করিতেছি→করছি, হইয়াছে→হয়েছে, করিয়া→করে; তাই not অতএব; প্রাণের সংকেত→প্রাণ-সংকেত.
+- Direct quote: verb after the quote: "<quote>" - এই বলে জিজ্ঞেস করছেন।
+- Pairs: Dimension→মাত্রা, isn't it?→তাই না?
+- ✗ আপনি কি জানেন → ✓ জানেন তো (spoken tag, shorter)
+- ✗ সত্যি বলতে → ✓ মূলত (essentially, not contradiction)
+- ✗ যোগী মনে করেন → ✓ যোগী হিসেবে দেখলেও ('known to be' exactly)
+- ✗ কষ্ট পায় → ✓ ব্যথা পায় (physical pain ≠ suffering)
+- ✗ প্রচণ্ডতা → ✓ তীব্রতা (intense in this context)

@@ -168,6 +168,30 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+26. **v0.24.0: "AI · test rules" — `--script-source ai_test`.** A testing
+    mode for prompt-mode knowledge inside AI mode, isolated from Prompt chain
+    and AI · learns (both unchanged; with the flag off the AI prompt is
+    byte-identical).
+    - **House rules:** `engine/pipeline/ai_rules/_common.md` (holistic mapping,
+      pulse cases 1-3 in ` | ` terms, in-line punctuation, integrity, review
+      checklist) + `<Language>.md` (register, sentence-end mark, `!`, respect,
+      right/wrong examples) for all 12 languages, distilled from Step1-3. No
+      `...` instructions, no paragraphing, no emotion tags, no SRT format.
+      Loaded by `ai_lang.house_rules()`; prompt files are still never read.
+    - **Precedence: rules win.** `build_static_prefix(house_rules=True)` puts
+      them after the learned patterns and corrections with an override
+      statement; the proofer, grammar and tone critics, `review_assist`,
+      `suggest_fits` and `fit_to_seconds` get the same flag.
+    - **Read-only:** memory and profile are read; `--steps dub` learns
+      nothing; `--learn-final` refuses a `_TEST` run; the panel disables
+      Learn from final dub for it.
+    - **Own folder:** `<src>/<stem>_TEST/`, files `<stem>_TEST_*` (as if the
+      audio were named `<stem>_TEST`). A normal run from the copy inside it
+      goes to the ordinary `<stem>` folder. Additive fields: AI draft
+      `"mode": "ai"|"test"`, manifest `"variant": "test"`; both
+      importers then name tracks `... [TEST]`.
+    - Tests: `test_house_rules.py`, `test_test_mode.py` (12 tests).
+
 25. **v0.23.0: six text corrections** (review screen and Regenerate tab,
     shared `V5.ASSIST_QUICK`), in three pairs:
     - **Speed up / Slow down**: speed only, the script never changes. The

@@ -287,11 +287,11 @@ REQUIRED_ATTRIBUTES = [
 # filters by the active set, so stray working keys never leak into the JSON.
 # v0.7 adds sync_texts / synced_count / unsynced_count — written by the
 # match sync mode, "" otherwise (consumers skip empties, per contract).
-MANIFEST_KEYS = ["status", "error", "audio", "language", "out_dir",
+MANIFEST_KEYS = ["status", "error", "variant", "audio", "language", "out_dir",
                  "en_audio", "en_srt", "tts_wav", "timestamps_txt",
                  "synced_wav", "synced_srt", "sync_texts",
                  "synced_count", "unsynced_count"]
-REVIEW_MANIFEST_KEYS = ["status", "error", "audio", "language", "out_dir",
+REVIEW_MANIFEST_KEYS = ["status", "error", "variant", "audio", "language", "out_dir",
                         "en_srt", "en_text", "translation_text",
                         "final_script"]
 REGEN_MANIFEST_KEYS = ["status", "error", "regen_wav"]
@@ -367,7 +367,7 @@ def _parse_args():
                          "translation. Transcription (S1a/S1b) still runs — "
                          "the sync stages need it.")
     ap.add_argument("--script-source", dest="script_source",
-                    default="prompt", choices=["prompt", "ai", "eleven"],
+                    default="prompt", choices=["prompt", "ai", "ai_test", "eleven"],
                     help="Who writes the script (v0.18). 'prompt' "
                          "(default): the Step1 -> Step2 -> Step3 prompt "
                          "chain. 'ai': the self-learning translator "
@@ -557,7 +557,7 @@ def _parse_args():
     if args.text_file or args.out_wav or args.in_wav:
         ap.error("--text-file/--out-wav/--in-wav are only valid with "
                  "--regen-chunk / --voice-change")
-    if args.script_source in ("ai", "eleven"):
+    if args.script_source in ("ai", "ai_test", "eleven"):
         if args.provided_script:
             ap.error(f"--script-source {args.script_source} writes the script "
                      "itself — it cannot be combined with --provided-script")
@@ -565,6 +565,33 @@ def _parse_args():
             ap.error(f"--script-source {args.script_source} is only valid "
                      "with --steps full/translate/dub")
     return args
+
+
+# v0.24 "AI · test rules": AI mode + the distilled prompt-mode house rules,
+# run read-only (never learns) into its own <audio>_TEST folder. Every AI-mode
+# behaviour (phrase cues, anchor sync, no prompt files) applies to it.
+TEST_SUFFIX = "_TEST"
+
+
+def _ai_source(args):
+    """"ai" / "ai_test" for the AI translator sources, else None."""
+    s = getattr(args, "script_source", "prompt")
+    return s if s in ("ai", "ai_test") else None
+
+
+def _is_test(args) -> bool:
+    return getattr(args, "script_source", "prompt") == "ai_test"
+
+
+def _is_test_base(base: str) -> bool:
+    """A run base inside an <x>_TEST folder, or whose AI draft says test."""
+    if os.path.basename(os.path.dirname(base or "")).endswith(TEST_SUFFIX):
+        return True
+    try:
+        with open((base or "") + "_ai_draft.json", "r", encoding="utf-8") as f:
+            return json.load(f).get("mode") == "test"
+    except Exception:
+        return False
 
 
 def _emotion_enabled(args) -> bool:
@@ -786,6 +813,14 @@ def _selfcheck(args) -> int:
               "into them: " + ", ".join(missing_custom[:10])
               + ("…" if len(missing_custom) > 10 else ""), flush=True)
 
+    # v0.24: "AI · test rules" needs a rules file per language (a warning:
+    # without one the test source simply runs as plain AI mode).
+    no_rules = [lang for lang in LANGUAGES if lang not in custom
+                and not pl.house_rules(lang)]
+    if no_rules:
+        print("WARNING: no AI house rules (pipeline/ai_rules/) for: "
+              + ", ".join(no_rules), flush=True)
+
     # Config presence is a WARNING, not a failure: a fresh clone passes
     # selfcheck and the user configures keys afterwards (setup / panel).
     for label, path in (("LLM settings", pl.LLM_SETTINGS_FILE),
@@ -897,7 +932,7 @@ def _load_pipeline_and_keys(args, need_llm=True):
     return pl, api_key
 
 
-def _prepare_out_dir(pl, audio_path, manifest):
+def _prepare_out_dir(pl, audio_path, manifest, test=False):
     """Create/reuse the app-convention output folder next to the audio.
 
     Done BEFORE any paid API work (cheap mkdir+copy): an unwritable input
@@ -906,6 +941,8 @@ def _prepare_out_dir(pl, audio_path, manifest):
     means even early failures write the manifest copy next to the audio.
     Returns (out_dir, base).
     """
+    if test:
+        return _prepare_test_dir(audio_path, manifest)
     out_dir = pl._prepare_output_dir(audio_path)
     if not os.access(out_dir, os.W_OK):
         raise RuntimeError(f"Output folder is not writable: {out_dir} — "
@@ -916,6 +953,39 @@ def _prepare_out_dir(pl, audio_path, manifest):
     copied_audio = os.path.join(out_dir, os.path.basename(audio_path))
     manifest["en_audio"] = copied_audio if os.path.exists(copied_audio) else ""
     return out_dir, base
+
+
+def _prepare_test_dir(audio_path, manifest):
+    """v0.24 "AI · test rules": <src>/<stem>_TEST/ with every file named
+    <stem>_TEST_*, exactly as if the audio were called <stem>_TEST — so every
+    rule that says "the folder name is the base name" (the panel's cast file,
+    Regenerate's English lookup, the importers) works unchanged, and a test
+    run never overwrites the AI-mode or prompt-mode files of the same audio."""
+    src_dir = os.path.dirname(os.path.abspath(audio_path))
+    stem = os.path.splitext(os.path.basename(audio_path))[0]
+    tname = stem + TEST_SUFFIX
+    if os.path.basename(src_dir) == tname:          # the copy inside it
+        out_dir = src_dir
+    elif os.path.basename(src_dir) == stem:          # the normal-run copy
+        out_dir = os.path.join(os.path.dirname(src_dir), tname)
+    else:
+        out_dir = os.path.join(src_dir, tname)
+    os.makedirs(out_dir, exist_ok=True)
+    if not os.access(out_dir, os.W_OK):
+        raise RuntimeError(f"Output folder is not writable: {out_dir} — "
+                           "move the audio to a writable location.")
+    copied = os.path.join(out_dir, os.path.basename(audio_path))
+    try:
+        if (os.path.abspath(audio_path) != os.path.abspath(copied)
+                and not os.path.exists(copied)):
+            import shutil
+            shutil.copy2(audio_path, copied)
+    except Exception:
+        pass
+    manifest["out_dir"] = out_dir
+    manifest["en_audio"] = copied if os.path.exists(copied) else ""
+    manifest["variant"] = "test"
+    return out_dir, os.path.join(out_dir, tname)
 
 
 def _stage_translate(pl, args, api_key, manifest, ctx):
@@ -944,8 +1014,12 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
               f"({len(provided_text)} chars) — the LLM translation chain "
               "will be skipped.")
 
-    out_dir, base = _prepare_out_dir(pl, audio_path, manifest)
+    out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
+                                     test=_is_test(args))
     ctx["out_dir"], ctx["base"] = out_dir, base
+    if _is_test(args):
+        _note(f"Test mode (AI · test rules): house rules ON, nothing is "
+              f"learned; results go to {os.path.basename(out_dir)}.")
 
     # ── [S1a] Transcribe the English audio ─────────────────────────────────
     _say("S1a", "Transcribing English audio (ElevenLabs Scribe)…")
@@ -994,8 +1068,7 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
     # with zero LLM cost, partial matches become a prompt glossary. No
     # _tm_capture — the engine records nothing. The lookup helpers stay
     # getattr-guarded so a broken/absent tm module degrades gracefully.
-    ai_mode = (getattr(args, "script_source", "prompt") == "ai"
-               and provided_text is None)
+    ai_mode = (_ai_source(args) is not None and provided_text is None)
     # The AI draft is what --steps dub learns corrections against, so a
     # stale one from an earlier AI run must never outlive this translation.
     ai_draft_path = base + "_ai_draft.json"
@@ -1065,7 +1138,9 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
                     "language": language,
                     "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "rows": ctx["ai_rows"], "pages": [],
-                    "source": "memory"}, ensure_ascii=False, indent=2))
+                    "source": "memory",
+                    "mode": "test" if _is_test(args) else "ai"},
+                    ensure_ascii=False, indent=2))
                 _note(f"AI mode: {len(prs)} memory paragraph(s) timed "
                       "against the English — anchor sync can place them.")
         _say("S2b", "Review step skipped (proofed script from memory).")
@@ -1087,6 +1162,7 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
                 "proofer": bool(_engine_setting("ai_proofer", 1, int, 0, 1)),
                 "concurrency": _engine_setting("ai_concurrency", 3, int,
                                                1, 12),
+                "house_rules": _is_test(args),
             })
         tr_result = rev_result = punc_result
         ctx["ai_rows"] = ai_rows
@@ -1095,6 +1171,7 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "rows": ai_rows,
             "pages": ai_info.get("page_outcomes", []),
+            "mode": "test" if _is_test(args) else "ai",
         }, ensure_ascii=False, indent=2))
         _write_text(ai_report_path, ai_info.get("report", ""))
         _say("S2b", f"AI agents done: {ai_info['summary']}")
@@ -1265,7 +1342,7 @@ def _stage_dub(pl, args, api_key, manifest, ctx, voice_id):
         _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows)
         return
     mode = _sync_mode(args)
-    if getattr(args, "script_source", "prompt") == "ai" and mode != "match":
+    if _ai_source(args) and mode != "match":
         # AI mode never uses the prompt-file sync (SyncingPrompt/Step4):
         # match mode builds its matcher prompt inline in code.
         _note(f"Sync mode: match (AI mode never uses the '{mode}' prompt-"
@@ -1609,7 +1686,7 @@ def _anchor_rows(pl, args, ctx):
     anchor sync aligns them to the English phrases purely by duration.
     ai_anchor_sync=0 is honoured by returning None; the dispatcher then uses
     match mode (inline prompt, no prompt files), never legacy."""
-    if getattr(args, "script_source", "prompt") != "ai":
+    if not _ai_source(args):
         return None
     if not _engine_setting("ai_anchor_sync", 1, int, 0, 1):
         _note("Anchor sync is off (ai_anchor_sync=0) — AI mode uses match "
@@ -1885,7 +1962,8 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
                 budget = _slot(i) * max_atempo * 0.95
                 en = pieces[i]["en"]
                 shorter = pl.fit_to_seconds(en, texts[i], budget, language,
-                                            pl.GEMINI_DEFAULT_MODEL)
+                                            pl.GEMINI_DEFAULT_MODEL,
+                                            house_rules=_is_test(args))
                 if shorter:
                     idxs.append(i)
                     new_texts.append(shorter)
@@ -2604,7 +2682,8 @@ def _required_prompts(args):
     # proofer and fit agents build their prompts inline, and its sync is
     # anchor (or match, whose matcher prompt is inline) — never legacy.
     # ElevenLabs Dub (v0.22) hands the whole job to ElevenLabs: no prompts.
-    if getattr(args, "script_source", "prompt") in ("ai", "eleven"):
+    if getattr(args, "script_source", "prompt") in ("ai", "ai_test",
+                                                    "eleven"):
         return need
     if args.steps in ("full", "translate") and not args.provided_script:
         need += ["Step1_Translation_Prompt", "Step2_Review_Prompt",
@@ -3277,7 +3356,8 @@ def _run_dub(args, manifest):
                                          args.voice_id)
     _note(f"Dub voice: {voice_id} ({voice_how})")
 
-    out_dir, base = _prepare_out_dir(pl, ctx["audio_path"], manifest)
+    out_dir, base = _prepare_out_dir(pl, ctx["audio_path"], manifest,
+                                     test=_is_test(args))
     ctx["out_dir"], ctx["base"] = out_dir, base
 
     # The translate stage must have run first in this out_dir.
@@ -3295,7 +3375,7 @@ def _run_dub(args, manifest):
             "Missing: " + "; ".join(missing))
     manifest["en_srt"] = required["English SRT"]
     ctx["en_srt_text"] = _read_text(required["English sync SRT"])
-    if getattr(args, "script_source", "prompt") == "ai":
+    if _ai_source(args):
         _load_ai_phrases(ctx)            # v0.20: the translator's phrases
 
     script_path = os.path.abspath(os.path.expanduser(args.script))
@@ -3321,7 +3401,9 @@ def _run_dub(args, manifest):
         _note(f"WARNING: marker {marker!r} not found in "
               f"{os.path.basename(fs_path)} — FinalScript left unchanged.")
 
-    if getattr(args, "script_source", "prompt") == "ai":
+    if _is_test(args):
+        _note("Test mode (AI · test rules): nothing is learned from this run.")
+    elif _ai_source(args):
         _maybe_ai_learn(pl, args, base, script_text)
 
     # English audio duration for the sync algorithm (local decode, no API).
@@ -3484,7 +3566,8 @@ def _run_suggest_fit(args, manifest):
     blocks, total = [], 0
     for r in rows:
         opts = pl.suggest_fits(r["en"], r["tr"], r["speech"], r["hard"],
-                               args.language, pl.GEMINI_DEFAULT_MODEL)
+                               args.language, pl.GEMINI_DEFAULT_MODEL,
+                               house_rules=_is_test(args))
         _note(f"  line {r['index']}: {len(opts)} option(s)")
         if opts:
             blocks.append("@@ " + str(r["index"]) + "\n" + "\n".join(opts))
@@ -3530,7 +3613,8 @@ def _run_review_assist(args, manifest):
     _note(f"Assistant: line {req['index']} — \"{req['ask'][:80]}\"")
     res = pl.review_assist(req["en"], req["tr"], req["speech"], req["hard"],
                            req["ask"], args.language, req["history"],
-                           req["prev"], req["next"], pl.GEMINI_DEFAULT_MODEL)
+                           req["prev"], req["next"], pl.GEMINI_DEFAULT_MODEL,
+                           house_rules=_is_test(args))
     lines = ["REPLY: " + (res.get("reply") or "")]
     if res.get("speed") is not None:
         lines.append(f"SPEED: {res['speed']:.2f}")
@@ -3814,6 +3898,11 @@ def _run_learn_final(args, manifest):
     if not base or not os.path.isdir(os.path.dirname(base) or "."):
         raise RuntimeError("The learn request names no usable run folder "
                            f"(BASE: {base or '(missing)'}).")
+    if _is_test_base(base):
+        raise RuntimeError(
+            "This dub was made with 'AI · test rules' (a _TEST folder). Test "
+            "runs never teach AI mode — dub it with 'AI · learns' to learn "
+            "from it.")
     if not chunks:
         raise RuntimeError("The learn request has no dub chunks with text.")
     out_path = in_path + ".out"

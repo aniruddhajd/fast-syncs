@@ -1,0 +1,11 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Assamese (চলিত / সাধাৰণ কথ্য ভাষা), not literary. Use cholito contractions and Assamese letters (ৰ, ৱ), never Bengali forms.
+- Sentence end: daṛi `।`. Treat `।` exactly like a period. Inside flowing speech, replace it with `;` when the same argument continues, or `-` when the same thought continues. Keep `।` only where the thought truly closes.
+- Use `!` instead of `।` when a point ends in a clipped, non-grammatical way.
+- Respect: address the listener with আপুনি/আপোনাৰ. Drop a repeated pronoun; the verb ending carries person/honorific.
+- ✗ কৰি আছো → ✓ কৰিছো (spoken contraction, fewer syllables)
+- ✗ কাৰণবশত → ✓ কাৰণত (spoken over formal)
+- ✗ অতএৱ → ✓ সেইবাবে (avoid literary connector)
+- ✗ জীৱনৰ সংকেত → ✓ জীৱন-সংকেত (samasa shortens phrase)
+- ✗ সচেতনভাৱে → ✓ সংকল্পেৰে (intent: deliberately, not consciously)
+- ✗ সকলোৱেই সুধি আছে, "<quote>" → ✓ সকলোৱেই, "<quote>" - এইদৰে সুধি আছে (speech verb after quote)

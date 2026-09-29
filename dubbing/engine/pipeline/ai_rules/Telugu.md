@@ -1,0 +1,13 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Telugu (వ్యావహారిక భాష), never గ్రాంధిక / formal-literary.
+- Sentence end: Western full stop `.`, never `।`. Mid-flow, drop `.`: use `;` if the argument continues, `-` if the same image/statement continues.
+- End a trailing, non-grammatical point with `!` instead of `.`: `గమనించాలి - ఎవరు ఏం చెప్తున్నారో!`
+- Drop repeated pronouns; Telugu verb endings carry person/honorific.
+- Quotes: subject, quote, saying-verb last (`"<quote>" - అని అడుగుతున్నారు.`).
+- Use contracted spoken verbs: చేస్తున్నాను → చేస్తన్నాను, అయిపోయింది → అయ్యింది.
+- ✗ కఠినంగా → ✓ తీవ్రంగా (intense, not harsh)
+- ✗ అనుకుంటారు → ✓ చూసినా ("known to be", not "think")
+- ✗ నిజంగా చెప్పాలంటే → ✓ అసలు (essentially; not contradiction)
+- ✗ అందువల్ల → ✓ అందుకే (spoken, not formal connector)
+- ✗ కావున → ✓ కాబట్టి (spoken, not formal connector)
+- ✗ ఎవరు ఏం చెప్తున్నారో అని. → ✓ ఎవరు ఏం చెప్తున్నారో! (trailing end takes `!`)

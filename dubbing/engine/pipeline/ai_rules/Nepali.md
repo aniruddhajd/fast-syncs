@@ -1,0 +1,11 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Nepali (बोलचालको भाषा), not literary. Prefer bolchal contractions.
+- Sentence end: daṛi `।`. Treat `।` exactly like a period. Inside flowing speech, replace it with `;` when the same argument continues, or `-` when the same thought continues. Keep `।` only where the thought truly closes.
+- Use `!` instead of `।` when a point ends in a clipped, non-grammatical way.
+- Respect: address the listener with तपाईं plus -नुहुन्छ/-नुभयो forms, and third persons with उहाँहरू. Drop a repeated तपाईं; the honorific verb already carries it.
+- ✗ गरिरहेको छु → ✓ गर्दैछु (spoken contraction, fewer syllables)
+- ✗ अतः → ✓ त्यसैले (avoid literary connector)
+- ✗ सचेत रूपमा → ✓ सङ्कल्पपूर्वक (intent: deliberately, not consciously)
+- ✗ बढी समय रहन्छ → ✓ बेरसम्म रहन्छ (tighter spoken phrasing)
+- ✗ तपाईं आश्रममा बस्नुहुन्छ → ✓ आश्रममा बस्नुहुन्छ (verb carries honorific subject)
+- ✗ सबैजना सोधिरहनुभएको छ, "<quote>" → ✓ सबैजना, "<quote>" - यसो भनेर सोधिरहनुभएको छ (speech verb after quote)

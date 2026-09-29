@@ -384,7 +384,8 @@ local TRACK_UNSYNC = "Un sync"
 -- v0.1 rule: never reuse an existing same-named track. A second import must
 -- create a fresh set, so find the smallest suffix (" 2", " 3", ...) that is
 -- free for ALL THREE names at once and return it ("" for the first import).
-local function fresh_name_suffix()
+local function fresh_name_suffix(tag)
+  tag = tag or ""
   local existing = {}
   for i = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, i)
@@ -394,9 +395,9 @@ local function fresh_name_suffix()
   local n = 1
   while n < 1000 do
     local suffix = (n == 1) and "" or (" " .. n)
-    if not (existing[TRACK_EN .. suffix]
-            or existing[TRACK_CHUNKS .. suffix]
-            or existing[TRACK_REF .. suffix]) then
+    if not (existing[TRACK_EN .. tag .. suffix]
+            or existing[TRACK_CHUNKS .. tag .. suffix]
+            or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
     n = n + 1
@@ -481,7 +482,7 @@ end
 local MANIFEST_KEYS = {
   "status", "error", "audio", "language", "out_dir",
   "en_audio", "en_srt", "tts_wav", "timestamps_txt",
-  "synced_wav", "synced_srt", "sync_texts",
+  "synced_wav", "synced_srt", "sync_texts", "variant",
   "synced_count", "unsynced_count",
 }
 
@@ -619,7 +620,9 @@ local function main()
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
 
-  local suffix = fresh_name_suffix()
+  -- v0.24: an "AI · test rules" run imports as [TEST] tracks.
+  local tag = (m.variant == "test") and " [TEST]" or ""
+  local suffix = tag .. fresh_name_suffix(tag)
   local chunks_added, notes_matched = 0, 0
 
   -- 1. EN Original
@@ -670,7 +673,7 @@ local function main()
     end
 
     if #unsync_entries > 0 then
-      local tr = find_or_append_track(TRACK_UNSYNC)
+      local tr = find_or_append_track(TRACK_UNSYNC .. tag)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, e.synced_start, e.dur,
                                  e.orig_start,

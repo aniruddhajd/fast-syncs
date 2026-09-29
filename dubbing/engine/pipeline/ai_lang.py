@@ -13,6 +13,7 @@ skipped, because its script is unknown.
 
 from __future__ import annotations
 
+import os
 import unicodedata
 from typing import Dict, Optional
 
@@ -139,6 +140,38 @@ def glossary_directive(language: str) -> str:
 def translit_directive(language: str) -> str:
     return (f"Transliterate proper names using standard {language} literary "
             f"usage (e.g., '{ai_lang_spec(language)['translitExample']}').")
+
+
+# ── v0.24 house rules (the "AI · test rules" source only) ────────────────────
+# Prompt-mode know-how (Step1-3 prompt files) distilled into ai_rules/:
+# _common.md (structural rules shared by every language) + <Language>.md.
+# The prompt files themselves are never read here — AI mode still opens no
+# prompt file; these are separate, compact, tracked rule files.
+AI_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "ai_rules")
+_RULES_CACHE: Dict[str, str] = {}
+
+
+def _read_rule(name: str) -> str:
+    try:
+        with open(os.path.join(AI_RULES_DIR, name), encoding="utf-8") as f:
+            # The provenance comment at the top is for people, not the model.
+            return "\n".join(ln for ln in f.read().splitlines()
+                             if not ln.lstrip().startswith("<!--")).strip()
+    except OSError:
+        return ""
+
+
+def house_rules(language: str) -> str:
+    """_common.md + <language>.md, cached. "" when the language has no rules
+    file (a user-added language) — never raises."""
+    lang = (language or "").strip()
+    if lang not in _RULES_CACHE:
+        own = _read_rule(lang + ".md") if lang else ""
+        _RULES_CACHE[lang] = ("\n\n".join(p for p in (_read_rule("_common.md"),
+                                                        own) if p)
+                              if own else "")
+    return _RULES_CACHE[lang]
 
 
 def script_share(text: str, language: str) -> Optional[float]:

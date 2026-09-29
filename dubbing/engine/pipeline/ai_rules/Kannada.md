@@ -1,0 +1,13 @@
+<!-- Distilled from dubbing/prompts/Step1-3 for the AI · test rules script source (v0.24). Pauses are written ' | ', never the three-dot mark. -->
+- Register: modern spoken Kannada (ಆಡುಭಾಷೆ), never ಗ್ರಾಂಥಿಕ ಭಾಷೆ / formal-literary.
+- Sentence end: Western full stop `.`, never `।`. Mid-flow, drop `.`: use `;` if the argument continues, `-` if the same image/statement continues.
+- End a trailing, non-grammatical point with `!` instead of `.`: `ಗಮನಿಸಬೇಕು - ಯಾರು ಏನು ಹೇಳ್ತಿದಾರೆ ಅಂತ!`
+- Drop repeated pronouns; Kannada verb endings carry person/honorific.
+- Quotes: subject, quote, saying-verb last (`"<quote>" ಅಂತ ಕೇಳ್ತಾರೆ.`).
+- Use contracted spoken verbs: ಮಾಡುತ್ತಿದ್ದೇನೆ → ಮಾಡ್ತಿದೀನಿ, ಆಗುತ್ತದೆ → ಆಗತ್ತೆ.
+- ✗ ಪ್ರಚಂಡತೆ → ✓ ತೀವ್ರತೆ (intense, not overwhelming)
+- ✗ ಭಾವಿಸ್ತಾರೆ → ✓ ನೋಡಿದ್ರೂ ("known to be", not "think")
+- ✗ ನಿಜ ಹೇಳಬೇಕು ಅಂದ್ರೆ → ✓ ಮೂಲತಃ (essentially; not contradiction)
+- ✗ ಏಕೆಂದರೆ → ✓ ಯಾಕಂದ್ರೆ (spoken, not formal connector)
+- ✗ ಆದ್ದರಿಂದ → ✓ ಹಾಗಾಗಿ / ಅದಕ್ಕೇ (spoken, not formal connector)
+- ✗ ಆಗಿರಲೇಬೇಕು → ✓ ಆಗೇ ಇರತ್ತೆ (natural spoken certainty)

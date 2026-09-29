@@ -643,6 +643,11 @@ def _prepare_output_dir(audio_path: str) -> str:
     # a sibling again would nest folder/folder/folder… one level per re-run.
     if os.path.basename(src_dir) == base_name:
         return src_dir
+    # v0.24: the audio is the copy inside an "AI · test rules" <base>_TEST
+    # folder — a normal run belongs in the ordinary <base> folder beside it,
+    # never inside the test folder.
+    if os.path.basename(src_dir) == base_name + "_TEST":
+        src_dir = os.path.dirname(src_dir)
     out_dir   = os.path.join(src_dir, base_name)
     try:
         os.makedirs(out_dir, exist_ok=True)

@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Sequence
 
 from .ai_lang import glossary_directive, honorific_directive, translit_directive
+from .ai_lang import house_rules as _house_rules_text
 from .config import GEMINI_DEFAULT_MODEL
 from .llm import _llm_generate, _strip_code_fence
 
@@ -60,7 +61,9 @@ def _ai_call(prompt: str, model: str, role: str, temperature: float,
 
 # ── The three critics (lekhak critics.ts:87-148) ────────────────────────────
 
-def _grammar_prompt(src, tgt, lang):
+def _grammar_prompt(src, tgt, lang, rules=""):
+    extra = (f"4. The house dubbing rules below override any other preference:\n{rules}\n"
+             if rules else "")
     return f"""You are a professional {lang} proofreader and grammarian. Check whether the translation contains grammatical issues, typos, unnatural word flow, or incorrect honorifics.
 
 ENGLISH ORIGINAL:
@@ -73,7 +76,7 @@ CRITERIA:
 1. Standard {lang} script spelling rules must be followed.
 2. Grammar must feel natural and flow smoothly when SPOKEN — this is a voice-over script.
 3. {honorific_directive(lang)}
-
+{extra}
 Return JSON: {{ "isValid": boolean, "feedback": "If isValid is false, state exactly which rule is broken and how to correct it. Otherwise empty." }}"""
 
 
@@ -105,8 +108,10 @@ If the translation violates a mapping, uses a forbidden or negative term, or ign
 Return JSON: {{ "isValid": boolean, "feedback": "Details of any vocabulary violation." }}"""
 
 
-def _tone_prompt(src, tgt, lang, guidelines, prof):
+def _tone_prompt(src, tgt, lang, guidelines, prof, rules=""):
     extra = ""
+    if rules:
+        extra += f"- House dubbing rules (these win over any other style):\n{rules}\n"
     if guidelines:
         extra += f"- Custom user guidelines:\n{guidelines}\n"
     if prof and (prof.get("toneDescription") or prof.get("grammarRules")):
@@ -146,11 +151,16 @@ def _judge(prompt: str, model: str) -> dict:
 
 def run_critic_panel(source: str, target: str, language: str,
                      guidelines: str = "", profile: Optional[dict] = None,
-                     model: str = GEMINI_DEFAULT_MODEL) -> dict:
-    """{"isValid", "feedbacks": [...], "degraded": [critic names]}."""
-    prompts = (_grammar_prompt(source, target, language),
+                     model: str = GEMINI_DEFAULT_MODEL,
+                     house_rules: bool = False) -> dict:
+    """{"isValid", "feedbacks": [...], "degraded": [critic names]}.
+    *house_rules* (v0.24, "AI · test rules"): the grammar and tone critics
+    also judge against the distilled prompt-mode rules."""
+    rules = _house_rules_text(language) if house_rules else ""
+    prompts = (_grammar_prompt(source, target, language, rules),
                _glossary_prompt(source, target, language, guidelines, profile),
-               _tone_prompt(source, target, language, guidelines, profile))
+               _tone_prompt(source, target, language, guidelines, profile,
+                            rules))
     with ThreadPoolExecutor(max_workers=3) as ex:
         results = list(ex.map(lambda p: _judge(p, model), prompts))
     feedbacks, degraded = [], []
@@ -166,8 +176,13 @@ def run_critic_panel(source: str, target: str, language: str,
 # ── The proofer (lekhak proofer.ts:75-246) ──────────────────────────────────
 
 def proofer_prefix(language: str, guidelines: str = "",
-                   profile: Optional[dict] = None) -> str:
+                   profile: Optional[dict] = None,
+                   house_rules: bool = False) -> str:
     prof = profile or {}
+    rules = _house_rules_text(language) if house_rules else ""
+    house = (f"\nHOUSE DUBBING RULES (these override the house voice below "
+             f"wherever they conflict; flag a sentence that breaks one):\n"
+             f"{rules}\n" if rules else "")
     team = (f"\nTHIS TEAM'S OWN STYLE DIRECTIVES (a translation that follows "
             f"these is correct, even if you would have phrased it "
             f"differently):\n{guidelines}\n" if guidelines else "")
@@ -195,7 +210,7 @@ TERMINOLOGY & REGISTER DIRECTIVES:
 - {glossary_directive(language)}
 - {translit_directive(language)}
 - {honorific_directive(language)}
-{team}{voice}
+{team}{voice}{house}
 HARD RULES:
 - "sentence" must be copied character-for-character from the {language} TRANSLATION — an exact substring, complete sentences only. Never quote the English.
 - Each suggestion must be a complete drop-in replacement for exactly that sentence, in {language}, obeying the directives above.
@@ -241,10 +256,11 @@ def sanitise_findings(raw, target: str) -> List[dict]:
 def proof_pages(items: Sequence[dict], language: str, guidelines: str = "",
                 profile: Optional[dict] = None,
                 model: str = GEMINI_DEFAULT_MODEL,
-                status_cb=None) -> Dict[int, List[dict]]:
+                status_cb=None,
+                house_rules: bool = False) -> Dict[int, List[dict]]:
     """items: [{"id", "source", "target"}] -> {id: findings}. Never raises."""
     say = status_cb or (lambda _m: None)
-    prefix = proofer_prefix(language, guidelines, profile)
+    prefix = proofer_prefix(language, guidelines, profile, house_rules)
     found: Dict[int, List[dict]] = {}
     for i in range(0, len(items), AI_PROOF_BATCH):
         sl = list(items[i:i + AI_PROOF_BATCH])

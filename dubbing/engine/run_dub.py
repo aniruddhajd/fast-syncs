@@ -354,7 +354,7 @@ def _parse_args(argv):
                          "LLM translation chain (S2a-S2c) in --steps "
                          "translate/full runs")
     ap.add_argument("--script-source", dest="script_source",
-                    default="prompt", choices=["prompt", "ai", "eleven"],
+                    default="prompt", choices=["prompt", "ai", "ai_test", "eleven"],
                     help="v0.18: 'ai' = the Lekhak agentic translator "
                          "instead of the Step1-3 prompt chain (and, with "
                          "--steps dub, learn from the reviewed script). "
@@ -564,8 +564,12 @@ def main(argv=None) -> int:
             cmd += ["--recommend-voice", "--text-file", args.text_file]
         elif args.review_assist:
             cmd += ["--review-assist", "--text-file", args.text_file]
+            if args.script_source == "ai_test":     # v0.24: house rules
+                cmd += ["--script-source", "ai_test"]
         elif args.suggest_fit:
             cmd += ["--suggest-fit", "--text-file", args.text_file]
+            if args.script_source == "ai_test":     # v0.24: house rules
+                cmd += ["--script-source", "ai_test"]
         elif args.test_llm:
             cmd.append("--test-llm")
         elif args.list_voices:
@@ -587,7 +591,7 @@ def main(argv=None) -> int:
                 cmd += ["--provided-script", args.provided_script]
             if args.plan:
                 cmd += ["--plan", args.plan]
-            if args.script_source in ("ai", "eleven"):
+            if args.script_source in ("ai", "ai_test", "eleven"):
                 cmd += ["--script-source", args.script_source]
             if args.sync_mode:
                 cmd += ["--sync-mode", args.sync_mode]
