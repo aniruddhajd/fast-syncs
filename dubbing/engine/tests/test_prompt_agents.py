@@ -29,8 +29,11 @@ from pipeline import prompt_agents as pa              # noqa: E402
 
 EN = [(0.0, 2.0, "In 1947 India became free."),
       (2.4, 4.4, "It was a big moment.")]
-GOOD = "१९४७ मध्ये भारत स्वतंत्र झाला।\n\nतो एक मोठा क्षण होता।"
-NO_NUMBER = "भारत स्वतंत्र झाला।\n\nतो एक मोठा क्षण होता।"
+GOOD = "[1] १९४७ मध्ये भारत स्वतंत्र झाला।\n\n[2] तो एक मोठा क्षण होता।"
+NO_NUMBER = "[1] भारत स्वतंत्र झाला।\n\n[2] तो एक मोठा क्षण होता।"
+UNTAGGED = "१९४७ मध्ये भारत स्वतंत्र झाला।\n\nतो एक मोठा क्षण होता।"
+# v0.25.1: the translator groups both English lines into one thought unit
+ONE_UNIT = "[1-2] १९४७ मध्ये भारत स्वतंत्र झाला, तो एक मोठा क्षण होता।"
 
 
 def _prompt(name, lang):
@@ -80,6 +83,48 @@ class Agents(unittest.TestCase):
         self.assertIn("१९४७", script)
         self.assertIn("reviewer: rejected",
                       " ".join(info["page_outcomes"][0]["log"]))
+
+
+    def test_tags_give_exact_windows_and_never_reach_the_script(self):
+        (script, rows, _info), _ = self.run_with(
+            {"P1": [GOOD], "P2": [GOOD], "P3": [GOOD]})
+        self.assertEqual([r["cues"] for r in rows], [[1], [2]])
+        self.assertEqual((rows[1]["start"], rows[1]["end"]), (2.4, 4.4))
+        self.assertNotIn("[1]", script)
+        self.assertNotIn("[2]", script)
+
+    def test_thought_unit_over_two_lines_keeps_its_window(self):
+        (_s, rows, _i), _ = self.run_with(
+            {"P1": [ONE_UNIT], "P2": [ONE_UNIT], "P3": [ONE_UNIT]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["cues"], [1, 2])
+        self.assertEqual((rows[0]["start"], rows[0]["end"]), (0.0, 4.4))
+
+    def test_untagged_draft_is_retried(self):
+        (_s, rows, info), fake = self.run_with(
+            {"P1": [UNTAGGED, GOOD], "P2": [GOOD], "P3": [GOOD]})
+        self.assertEqual(fake.calls, ["P1", "P1", "P2", "P3"])
+        self.assertEqual([r["cues"] for r in rows], [[1], [2]])
+
+    def test_reviewer_that_loses_tags_is_rejected(self):
+        (_s, rows, info), _ = self.run_with(
+            {"P1": [GOOD], "P2": [UNTAGGED], "P3": [GOOD]})
+        self.assertEqual([r["cues"] for r in rows], [[1], [2]])
+        self.assertIn("reviewer: rejected",
+                      " ".join(info["page_outcomes"][0]["log"]))
+
+    def test_translator_input_is_numbered_with_the_tag_rule(self):
+        seen = []
+
+        def fake(dynamic, model=None, static_prefix=None, **kw):
+            seen.append(dynamic)
+            return GOOD
+        with mock.patch.object(pa, "_llm_generate", fake), \
+             mock.patch.object(pa, "_load_lang_prompt", _prompt):
+            pa.prompt_agents_translate(EN, "Marathi", "m")
+        self.assertIn("#1 [2.000s] In 1947", seen[0])
+        self.assertIn("OUTPUT RULE FOR SYNC", seen[0])
+        self.assertIn("KEEP THE [N-M] TAGS", seen[1])
 
 
 class Engine(unittest.TestCase):

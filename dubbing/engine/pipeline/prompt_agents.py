@@ -10,60 +10,123 @@ three agents, page by page:
   2. Reviewer     Step2_Review_Prompt_<lang>      — English + the draft
   3. Punctuator   Step3_Punctuation_Prompt_<lang> — the reviewed script
 
-Each agent gets exactly the input the Prompt chain gives it (same prompt
-file as the cached static prefix, same dynamic block), only for one page of
-the English instead of the whole talk, so pages run in parallel. Between the
-agents the free checks (ai_checks.run_checks: timing, numbers, script,
-dropped content, truncation, commentary) act as the supervisor:
+Each agent gets the Prompt chain's own input block (same prompt file as the
+cached static prefix), only for one page of the English, so pages run in
+parallel. Between the agents the free checks (ai_checks.run_checks) act as
+the supervisor:
 
-  * the Translator's draft that fails a check gets ONE retry, with the check
-    notes appended to its input; the retry is kept only if it is no worse;
+  * a Translator draft that fails a check gets ONE retry, with the check
+    notes appended; the retry is kept only if it is no worse;
   * a Reviewer or Punctuator output is kept only if it fails no more checks
     than its input and keeps every number and at least half the text
     (meaning_kept) — otherwise the page keeps the previous agent's text.
 
-Output rows are paired to the English phrase cues (_pair_review_rows), so
-the dub stage runs AI mode's anchor sync on them unchanged. Nothing is
-learned and nothing is read from AI memory: a pure test of the prompts.
-Step4 (emotion tags) is not used — anchor sync voices clean text.
+v0.25.1 — LINE TAGS. The first version paired the prompts' plain-text
+paragraphs to the English by length, and a live run put words under the
+wrong English: Step1 groups by THOUGHT UNIT and reorders words, so its
+paragraph breaks do not fall where the English lines break, and one clause
+drifting across a boundary shifted every following line. Now every English
+line is numbered (#N) and ONE output rule is appended after the untouched
+prompt: each paragraph starts with the numbers it covers, "[12-14] ...".
+The Reviewer and Punctuator are told to keep the tags. The tags are read
+with Lekhak's own parser (_rows_from_reply: every cue exactly once, in
+order, overlaps merged), so rows carry EXACT English windows — the strong
+anchor-sync hint Lekhak's rows have. Missing tags fail a check (TAGS) and
+the page is retried. Tags never reach the review screen or the voice.
+
+Nothing is learned and nothing is read from AI memory: a pure test of the
+prompts. Step4 (emotion tags) is not used — anchor sync voices clean text.
 """
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
 from .ai_checks import fail_count, has_failure, run_checks
-from .ai_translator import _pages, meaning_kept
+from .ai_translator import _pages, _rows_from_reply, meaning_kept
 from .config import GEMINI_DEFAULT_MODEL
-from .llm import (_llm_generate, _load_lang_prompt, _pair_review_rows,
+from .llm import (_llm_generate, _load_lang_prompt,
                   _split_translation_paragraphs, _strip_code_fence)
-from .srt_tools import _parse_srt_to_analysis_format, _srt_ts
 
 PA_CONCURRENCY = 3
 StatusCb = Optional[Callable[[str], None]]
 
+_TAG = re.compile(r"^\s*\[\s*#?(\d+)(?:\s*[-–]\s*#?(\d+))?\s*\]\s*(.*)$", re.S)
 
-def _page_srt(page) -> str:
+TAG_RULE = (
+    "\n\nOUTPUT RULE FOR SYNC (required, overrides any output format above): "
+    "every English line above is numbered #N. Begin EVERY paragraph of your "
+    "script with the numbers of the English lines it translates, as [N] or "
+    "[N-M], e.g. \"[12-14] <your text>\". Cover every English line exactly "
+    "once, in order; separate paragraphs with one blank line; write nothing "
+    "outside the paragraphs.")
+KEEP_TAGS = (
+    "\n\nKEEP THE [N-M] TAGS: every paragraph starts with a tag such as "
+    "[12-14] naming the English lines it translates. Keep each tag exactly "
+    "as it is at the start of its paragraph; do not merge, split, add or "
+    "renumber paragraphs.")
+
+
+def _numbered(page, next_start) -> str:
+    """The chain's '[dur] text [gap]' lines, each prefixed with its #N."""
     lines = []
-    for n, (_i, s0, s1, text) in enumerate(page, 1):
-        lines += [str(n), f"{_srt_ts(s0)} --> {_srt_ts(s1)}", text, ""]
-    return "\n".join(lines)
+    for k, (i, s0, s1, text) in enumerate(page):
+        nxt = page[k + 1][1] if k + 1 < len(page) else next_start
+        gap = (nxt - s1) if nxt is not None else 0.0
+        lines.append(f"#{i} [{s1 - s0:.3f}s] {text} [{gap:.3f}s]")
+    return "\n\n".join(lines)
 
 
-def _rows(page, text: str) -> List[dict]:
-    """Paragraphs of *text* paired to this page's English cues."""
-    en = [(float(s0), float(s1), t) for (_i, s0, s1, t) in page]
-    paras = _split_translation_paragraphs(text)
-    return [{"en": e, "tr": t, "start": a, "end": b}
-            for (e, t, a, b) in _pair_review_rows(en, paras)]
+def _parse(text: str):
+    """[{"cues": [...], "text": ...}] from tagged paragraphs; [] if untagged."""
+    out = []
+    for para in _split_translation_paragraphs(text):
+        m = _TAG.match(para)
+        if not m:
+            if out:                       # untagged tail joins the previous
+                out[-1]["text"] += " " + " ".join(para.split())
+            continue
+        a = int(m.group(1))
+        b = int(m.group(2) or a)
+        body = " ".join(m.group(3).split())
+        if body:
+            out.append({"cues": list(range(min(a, b), max(a, b) + 1)),
+                        "text": body})
+    return out
+
+
+def _tagged(rows) -> str:
+    """Rows back to tagged text for the next agent."""
+    return "\n\n".join(
+        f"[{r['cues'][0]}-{r['cues'][-1]}] {r['tr']}" if r.get("cues")
+        else r["tr"] for r in rows)
+
+
+def _plain(rows) -> str:
+    return "\n\n".join(r["tr"] for r in rows)
 
 
 def _judge(page, text: str, language: str):
-    """(rows, checks) — the free checks on one page's text."""
+    """(rows, checks) for one agent's output. Rows carry exact windows."""
     source = " ".join(c[3] for c in page)
-    rows = _rows(page, text) if text.strip() else []
-    return rows, run_checks(source, text, language, rows)
+    paras = _parse(text)
+    if not paras:
+        return [], [{"code": "TAGS", "severity": "fail",
+                     "detail": "The paragraphs have no [N-M] English line "
+                               "tags — start every paragraph with the "
+                               "numbers of the English lines it covers."}]
+    try:
+        rows, repaired = _rows_from_reply(paras, page)
+    except (ValueError, TypeError, KeyError):
+        return [], [{"code": "TAGS", "severity": "fail",
+                     "detail": "The [N-M] tags could not be matched to the "
+                               "English lines of this page."}]
+    for r in rows:
+        r.pop("pauses", None)             # the prompts use no " | " marks
+    return rows, run_checks(source, _plain(rows), language, rows,
+                            coverage_repaired=repaired)
 
 
 def _notes(checks) -> str:
@@ -77,48 +140,48 @@ def _call(dynamic: str, prompt: str, model: str) -> str:
                                            role="translate") or "").strip()
 
 
-def _run_page(idx: int, page, language: str, model: str,
+def _run_page(idx: int, page, next_start, language: str, model: str,
               prompts: dict) -> dict:
     """Translator -> (retry) -> Reviewer -> Punctuator for one page."""
-    formatted = _parse_srt_to_analysis_format(_page_srt(page))
+    english = _numbered(page, next_start)
     log, attempts = [], 0
 
-    # ── 1. Translator (the Step1 prompt, the chain's own input block) ──
-    dyn1 = f"\n\n=== Formatted SRT Content ===\n{formatted}"
-    draft = _call(dyn1, prompts["p1"], model)
+    # ── 1. Translator (Step1 + the chain's input block + the tag rule) ──
+    dyn1 = f"\n\n=== Formatted SRT Content ===\n{english}" + TAG_RULE
+    rows, checks = _judge(page, _call(dyn1, prompts["p1"], model), language)
     attempts += 1
-    rows, checks = _judge(page, draft, language)
     if has_failure(checks):
         retry = _call(dyn1 + "\n\nYOUR PREVIOUS DRAFT FAILED THESE CHECKS — "
                       "translate again and fix them:\n" + _notes(checks),
                       prompts["p1"], model)
         attempts += 1
         r_rows, r_checks = _judge(page, retry, language)
-        if retry and fail_count(r_checks) <= fail_count(checks):
-            draft, rows, checks = retry, r_rows, r_checks
+        if r_rows and (not rows or fail_count(r_checks) <= fail_count(checks)):
+            rows, checks = r_rows, r_checks
             log.append("translator: retried with the check notes (kept)")
         else:
             log.append("translator: retry was no better (first draft kept)")
+    if not rows:
+        raise RuntimeError("the translator returned no tagged paragraphs")
 
     # ── 2 + 3. Reviewer and Punctuator, each gated by the checks ──
-    text = draft
     for step, key, dyn in (
-            ("reviewer", "p2", f"\n\nEnglish text\n{formatted}\n\n"
+            ("reviewer", "p2", f"\n\nEnglish text\n{english}\n\n"
                                f"{language} Script for Tuning\n{{text}}"),
             ("punctuator", "p3", "\n\n{text}")):
-        out = _call(dyn.replace("{text}", text), prompts[key], model)
+        out = _call(dyn.replace("{text}", _tagged(rows)) + KEEP_TAGS,
+                    prompts[key], model)
         attempts += 1
         o_rows, o_checks = _judge(page, out, language)
-        if (out and meaning_kept(text, out)
+        if (o_rows and meaning_kept(_plain(rows), _plain(o_rows))
                 and fail_count(o_checks) <= fail_count(checks)):
-            text, rows, checks = out, o_rows, o_checks
+            rows, checks = o_rows, o_checks
             log.append(f"{step}: kept")
         else:
-            log.append(f"{step}: rejected (it dropped content or failed "
-                       "more checks) — previous text kept")
+            log.append(f"{step}: rejected (lost its line tags, dropped "
+                       "content or failed more checks) — previous text kept")
     return {"n": idx + 1, "cues": (page[0][0], page[-1][0]), "rows": rows,
-            "text": text, "checks": checks, "attempts": attempts,
-            "log": log}
+            "checks": checks, "attempts": attempts, "log": log}
 
 
 def prompt_agents_translate(en_entries: List[Tuple[float, float, str]],
@@ -142,19 +205,21 @@ def prompt_agents_translate(en_entries: List[Tuple[float, float, str]],
     pages = _pages(cues)
     say(f"Prompt agents: {len(pages)} page(s), {min(conc, len(pages))} in "
         "parallel — Translator (Step1) -> Reviewer (Step2) -> Punctuator "
-        "(Step3), checks between each.")
+        "(Step3), checks between each; paragraphs tagged with their English "
+        "lines.")
 
-    def work(item):
-        idx, page = item
+    def work(idx):
+        page = pages[idx]
+        nxt = pages[idx + 1][0][1] if idx + 1 < len(pages) else None
         try:
-            return _run_page(idx, page, language, model, prompts)
+            return _run_page(idx, page, nxt, language, model, prompts)
         except Exception as e:                       # noqa: BLE001
             return {"n": idx + 1, "cues": (page[0][0], page[-1][0]),
-                    "rows": [], "text": "", "checks": [], "attempts": 0,
+                    "rows": [], "checks": [], "attempts": 0,
                     "log": [f"error: {str(e)[:200]}"]}
 
     with ThreadPoolExecutor(max_workers=conc) as ex:
-        outs = list(ex.map(work, list(enumerate(pages))))
+        outs = list(ex.map(work, range(len(pages))))
     dead = [o["n"] for o in outs if not o["rows"]]
     if dead:
         raise RuntimeError(f"Prompt agents: page(s) {dead} of {len(pages)} "
@@ -162,7 +227,7 @@ def prompt_agents_translate(en_entries: List[Tuple[float, float, str]],
                            f"{outs[dead[0] - 1]['log'][-1:]}")
 
     rows = [r for o in outs for r in o["rows"]]
-    script = "\n\n".join(r["tr"] for r in rows)
+    script = _plain(rows)
     flagged = [o for o in outs if has_failure(o["checks"])]
     calls = sum(o["attempts"] for o in outs)
     summary = (f"{len(pages)} page(s), {calls} agent call(s); "
