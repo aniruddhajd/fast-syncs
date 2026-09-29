@@ -24,15 +24,19 @@ Adaptations (everything else is verbatim):
     --test-llm manifest.
 """
 
+import hashlib
+import http.client
 import json
 import os
 import re
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional, Set, Tuple
 
-from .config import (CONFIG_DIR, GEMINI_DEFAULT_MODEL, LLM_DEFAULT_BASE_URL,
+from .config import (CONFIG_DIR, DATA_DIR, GEMINI_DEFAULT_MODEL, LLM_DEFAULT_BASE_URL,
                      LLM_PROVIDER_GEMINI, LLM_PROVIDER_OPENAI,
                      LLM_PROVIDER_SERVER, LLM_PROVIDER_VERTEX,
                      LLM_PROVIDERS, LLM_SETTINGS_FILE,
@@ -328,15 +332,82 @@ def _gateway_needs_key(base: str) -> bool:
     return not _LOCAL_HOST_RE.match(_openai_host(base))
 
 
+# ── Transient-failure retry for the OpenAI-compatible path ──────────────────
+# The mapping call is the LAST thing a legacy dub does: it runs after the
+# ElevenLabs synthesis AND after the Scribe pass on the TTS audio. A gateway
+# that closes the socket mid-reply therefore threw away a fully paid-for run.
+# Seen on 2026-09-16: "ConnectionResetError: [WinError 10054] An existing
+# connection was forcibly closed by the remote host" at [S3c], on a run whose
+# start-of-run reachability probe had passed. A probe cannot predict a gateway
+# dying halfway, so the answer is to try again rather than to check harder.
+_LLM_ATTEMPTS      = 4
+_LLM_BACKOFF_SECS  = (5, 15, 45)          # waits after attempts 1, 2, 3
+_LLM_RETRY_STATUS  = (408, 409, 425, 429, 500, 502, 503, 504)
+
+
+def _llm_log(msg: str) -> None:
+    """Progress line for the LLM call.
+
+    Tagged [llm], NOT [Sxx]: this helper serves every stage that calls the
+    provider, and the REAPER panel takes the last "[Sxx]" tag it sees as the
+    current stage. Same reasoning as stt._stt_log.
+    """
+    print(f"[llm] {msg}", flush=True)
+
+
+def _llm_retryable(exc: BaseException) -> bool:
+    """Is this failure transient, so another attempt could plausibly succeed?
+
+    Typed walk over the exception, deliberately NOT a substring match on the
+    message: an HTTP reason phrase is server-supplied text and must never be
+    able to masquerade as a network fault. Same policy as
+    _is_endpoint_unreachable and config._is_cert_verify_error.
+
+    HTTPError is tested first because it subclasses URLError — a status code
+    proves a server answered, so only the overload/outage codes qualify.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _LLM_RETRY_STATUS
+    # Reached the server, then the conversation broke: connection reset, a
+    # half-closed keep-alive socket, a truncated body, a read that timed out.
+    # urllib wraps only errors raised while SENDING in URLError; one raised
+    # while READING the reply propagates raw, which is exactly how the
+    # WinError 10054 above escaped every handler here.
+    if isinstance(exc, (ConnectionError, TimeoutError,
+                        http.client.HTTPException)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        # DNS hiccup, refused, no route. Transient often enough to be worth a
+        # retry mid-run; the start-of-run probe is what catches a genuinely
+        # misconfigured endpoint, and it asks for a single attempt.
+        return True
+    return isinstance(exc, OSError)
+
+
+def _llm_wait(url: str, attempt: int, attempts: int, detail: str) -> None:
+    """Log a failed attempt and sleep before the next one."""
+    delay = _LLM_BACKOFF_SECS[min(attempt - 1, len(_LLM_BACKOFF_SECS) - 1)]
+    _llm_log(f"attempt {attempt}/{attempts} to {url} failed ({detail}) — "
+             f"retrying in {delay}s")
+    time.sleep(delay)
+
+
 def _openai_chat(prompt: str, model: str, timeout: float = 900.0,
+                 attempts: Optional[int] = None,
                  temperature: Optional[float] = None) -> str:
-    """Single-turn /v1/chat/completions call against the configured base URL."""
+    """Single-turn /v1/chat/completions call against the configured base URL.
+
+    Transient network and 5xx failures are retried up to *attempts* times with
+    a growing backoff. Pass attempts=1 for a probe that should report a broken
+    configuration immediately instead of waiting out the backoff.
+    """
     s = _get_llm_settings()
     urls = _openai_api_urls(s.get("openai_base_url") or "")
     model = (model or "").strip()
     if not model:
         raise ValueError("Model name is empty — set it in config/llm_settings.json "
                          "(panel Settings).")
+    attempts = _LLM_ATTEMPTS if attempts is None else max(1, int(attempts))
     headers = {"Content-Type": "application/json",
                "User-Agent": _http_user_agent()}
     api_key = (s.get("openai_api_key") or "").strip()
@@ -351,58 +422,80 @@ def _openai_chat(prompt: str, model: str, timeout: float = 900.0,
     payload = json.dumps(body).encode("utf-8")
     raw = final_url = sent_url = None
     for i, url in enumerate(urls):
-        req = urllib.request.Request(url, data=payload, headers=headers,
-                                     method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw       = resp.read().decode("utf-8", "replace")
-                final_url = resp.geturl()
-            sent_url = url
-            break
-        except urllib.error.HTTPError as e:
-            body = ""
+        try_next_url = False
+        for attempt in range(1, attempts + 1):
+            # Rebuilt per attempt: a urllib Request is consumed by urlopen.
+            req = urllib.request.Request(url, data=payload, headers=headers,
+                                         method="POST")
             try:
-                body = e.read().decode("utf-8", "replace")[:400]
-            except Exception:
-                pass
-            # A base URL with a path is usually the API root, but it can also be
-            # a proxy mounted on a sub-path. Retry the versioned shape once when
-            # the endpoint simply isn't there.
-            if e.code in (404, 405) and i + 1 < len(urls):
-                continue
-            if e.code == 403 and "1010" in body:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw       = resp.read().decode("utf-8", "replace")
+                    final_url = resp.geturl()
+                sent_url = url
+                break
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "replace")[:400]
+                except Exception:
+                    pass
+                # A base URL with a path is usually the API root, but it can
+                # also be a proxy mounted on a sub-path. Retry the versioned
+                # shape once when the endpoint simply isn't there.
+                if e.code in (404, 405) and i + 1 < len(urls):
+                    try_next_url = True
+                    break
+                if e.code == 403 and "1010" in body:
+                    raise RuntimeError(
+                        f'LLM endpoint {url} returned HTTP 403 with Cloudflare "error '
+                        'code: 1010" — the gateway is refusing this client\'s '
+                        "user-agent. The API key and model are not the problem. Set "
+                        '"http_user_agent" in config/llm_settings.json to override '
+                        "the agent string.") from e
+                # No key configured → no Authorization header was sent, so the
+                # gateway is rejecting an anonymous request. Its own wording for
+                # that ("No api key passed in.") reads like the key is wrong, which
+                # sends people re-pasting a key that was never stored.
+                if e.code in (401, 403) and not api_key:
+                    raise RuntimeError(
+                        f"LLM endpoint {url} returned HTTP {e.code} and this request "
+                        "carried NO API key: \"openai_api_key\" is empty in "
+                        "config/llm_settings.json. Enter the gateway key in the "
+                        "panel's Settings tab — the base URL and model are not the "
+                        f"problem. Gateway said: {body}") from e
+                if _llm_retryable(e) and attempt < attempts:
+                    _llm_wait(url, attempt, attempts, f"HTTP {e.code}")
+                    continue
+                raise RuntimeError(f"LLM endpoint {url} returned HTTP {e.code}: "
+                                   f"{body}") from e
+            except (OSError, http.client.HTTPException) as e:
+                # urllib.error.URLError is an OSError, so this arm covers both
+                # "never reached the server" and "the reply died in transit".
+                if _llm_retryable(e) and attempt < attempts:
+                    _llm_wait(url, attempt, attempts, type(e).__name__ + f": {e}")
+                    continue
+                if isinstance(e, urllib.error.URLError):
+                    raise RuntimeError(
+                        f"Cannot reach LLM endpoint {url} after {attempt} "
+                        f"attempt(s): {e.reason}") from e
                 raise RuntimeError(
-                    f'LLM endpoint {url} returned HTTP 403 with Cloudflare "error '
-                    'code: 1010" — the gateway is refusing this client\'s '
-                    "user-agent. The API key and model are not the problem. Set "
-                    '"http_user_agent" in config/llm_settings.json to override '
-                    "the agent string.") from e
-            # No key configured → no Authorization header was sent, so the
-            # gateway is rejecting an anonymous request. Its own wording for
-            # that ("No api key passed in.") reads like the key is wrong, which
-            # sends people re-pasting a key that was never stored.
-            if e.code in (401, 403) and not api_key:
-                raise RuntimeError(
-                    f"LLM endpoint {url} returned HTTP {e.code} and this request "
-                    "carried NO API key: \"openai_api_key\" is empty in "
-                    "config/llm_settings.json. Enter the gateway key in the "
-                    "panel's Settings tab — the base URL and model are not the "
-                    f"problem. Gateway said: {body}") from e
-            raise RuntimeError(f"LLM endpoint {url} returned HTTP {e.code}: "
-                               f"{body}") from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Cannot reach LLM endpoint {url}: {e.reason}") from e
+                    f"Lost the connection to the LLM endpoint {url} after "
+                    f"{attempt} attempt(s): {type(e).__name__}: {e}") from e
+        if sent_url:
+            break
+        if not try_next_url:
+            break
     url = sent_url or urls[-1]
     try:
         data = json.loads(raw)
     except ValueError:
         # A web-UI base URL (…/ui) redirects a POST to the login page, so the
         # body is HTML instead of JSON. Say that, rather than a parse error.
-        if raw.lstrip()[:1] == "<":
+        if (raw or "").lstrip()[:1] == "<":
             raise ValueError(f"{url} returned an HTML page, not JSON (request "
                              f"ended at {final_url}) — the base URL looks like a "
                              f"web-UI path. {_BASE_URL_HINT}") from None
-        raise ValueError(f"Unexpected response from {url}: {raw[:400]}") from None
+        raise ValueError(f"Unexpected response from {url}: {str(raw)[:400]}") from None
     try:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
@@ -480,10 +573,93 @@ def _model_for(role: Optional[str], fallback: str) -> str:
     return fallback
 
 
+# ─── On-disk reply cache for the mechanical LLM calls ───────────────────────
+# A dub that fails late (TTS quota, a dropped gateway, a locked wav) used to
+# pay for — and wait for — every LLM call again on the re-run. For the
+# MECHANICAL roles an identical request now reuses the reply it got before:
+#
+#   match    script <-> English section matching, and line shortening
+#   emotion  Step-4 emotion tags (also lets the legacy TTS-reuse fingerprint,
+#            which covers the enriched text, actually match on a re-run)
+#   mapping  legacy EN <-> target subtitle mapping
+#
+# NOT cached: "translate" (Step 1-3). Re-running the translate stage is how a
+# user asks for a fresh translation variant, so it must stay a live call.
+# Also never cached: probes / --test-llm (no role, or attempts= given) — they
+# exist to prove the endpoint works right now.
+#
+# Key = sha256 over provider, resolved model, gateway base URL, the static
+# prompt prefix, the per-request prompt and the generation parameters (none
+# are sent today; the slot keeps old entries from matching if some ever are).
+# Any change to the script, prompt files, model or provider is a miss. A
+# missing, unreadable or corrupt entry is a miss too — it silently falls back
+# to a live call. Lives in dubbing/data/ (gitignored). DUB_LLM_CACHE=0
+# switches it off.
+_LLM_CACHE_DIR = os.path.join(DATA_DIR, "llm_cache")
+_LLM_CACHE_ROLES = ("match", "emotion", "mapping")
+_LLM_CACHE_VERSION = 1
+
+
+def _llm_cache_enabled() -> bool:
+    return (os.environ.get("DUB_LLM_CACHE", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
+
+
+def _llm_cache_key(provider: str, model: str, base_url: str,
+                   static_prefix: Optional[str], prompt: str,
+                   params: Optional[dict] = None) -> str:
+    blob = json.dumps({"v": _LLM_CACHE_VERSION, "provider": provider or "",
+                       "model": model or "", "base_url": base_url or "",
+                       "static_prefix": static_prefix or "",
+                       "prompt": prompt or "", "params": params or {}},
+                      ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _llm_reply_nonempty(reply) -> bool:
+    return isinstance(reply, str) and bool(reply.strip())
+
+
+def _llm_cache_get(key: str, ok=None) -> Optional[str]:
+    """Cached reply for *key*, or None (missing / corrupt / fails *ok*)."""
+    try:
+        with open(os.path.join(_LLM_CACHE_DIR, key + ".json"), "r",
+                  encoding="utf-8") as f:
+            data = json.load(f)
+        reply = data.get("reply") if isinstance(data, dict) else None
+        if data.get("key") != key or not _llm_reply_nonempty(reply):
+            return None
+        if ok is not None and not ok(reply):
+            return None
+        return reply
+    except Exception:
+        return None
+
+
+def _llm_cache_put(key: str, reply, role: str, model: str, ok=None) -> None:
+    """Store a reply — only a usable one, so a garbage answer can never be
+    replayed forever. Best effort and atomic; failure is silent."""
+    try:
+        if not _llm_reply_nonempty(reply) or (ok is not None and not ok(reply)):
+            return
+        os.makedirs(_LLM_CACHE_DIR, exist_ok=True)
+        path = os.path.join(_LLM_CACHE_DIR, key + ".json")
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"key": key, "role": role, "model": model,
+                       "saved": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "reply": reply}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def _llm_generate(prompt: str, model: str = GEMINI_DEFAULT_MODEL,
                   static_prefix: Optional[str] = None,
                   role: Optional[str] = None,
-                  temperature: Optional[float] = None) -> str:
+                  temperature: Optional[float] = None,
+                  attempts: Optional[int] = None,
+                  cache_ok=None) -> str:
     """Provider-agnostic text generation. All pipeline LLM calls go through here.
 
     *static_prefix* is the reusable part (the per-language prompt file); *prompt*
@@ -493,22 +669,122 @@ def _llm_generate(prompt: str, model: str = GEMINI_DEFAULT_MODEL,
     which also relies on the static prefix coming first in the request.
 
     *role* (v0.7) names what this call is for — "translate", "emotion",
-    "match", "mapping" — so the panel can point that stage at its own model."""
+    "match", "mapping" — so the panel can point that stage at its own model.
+
+    *attempts* caps the transient-failure retries on the OpenAI-compatible
+    path. Leave it None for real work; pass 1 from a probe that should report
+    a broken configuration at once instead of waiting out the backoff.
+
+    *cache_ok* (optional) is a predicate a reply must pass to be stored in, or
+    replayed from, the on-disk reply cache (see _LLM_CACHE_ROLES above). Only
+    the mechanical roles are cached; everything else is always live."""
     s = _get_llm_settings()
-    if s.get("provider") == LLM_PROVIDER_SERVER:
+    provider = s.get("provider")
+    if provider == LLM_PROVIDER_SERVER:
         raise ValueError(_SERVER_MODE_ERROR)
-    if s.get("provider") == LLM_PROVIDER_OPENAI:
-        return _openai_chat(
-            (static_prefix or "") + prompt,
-            _model_for(role, (s.get("openai_model") or "").strip() or model),
-            temperature=temperature)
-    # Vertex / Gemini-key providers: the configured gemini_model overrides the
-    # caller's default so the panel's Model field controls these providers too.
-    gm = _model_for(role, (s.get("gemini_model") or "").strip() or model)
-    client = _make_genai_client()
-    use_cache = s.get("prompt_caching", "1") == "1"
-    return _genai_cached_generate(client, gm, static_prefix, prompt, use_cache,
-                                  temperature=temperature)
+    if provider == LLM_PROVIDER_OPENAI:
+        eff_model = _model_for(role, (s.get("openai_model") or "").strip() or model)
+        base_url = (s.get("openai_base_url") or "").strip()
+    else:
+        # Vertex / Gemini-key providers: the configured gemini_model overrides
+        # the caller's default so the panel's Model field controls these
+        # providers too.
+        eff_model = _model_for(role, (s.get("gemini_model") or "").strip() or model)
+        base_url = ""
+
+    key = None
+    if (role in _LLM_CACHE_ROLES and attempts is None and temperature is None
+            and _llm_cache_enabled()):
+        key = _llm_cache_key(provider, eff_model, base_url, static_prefix,
+                             prompt)
+        hit = _llm_cache_get(key, cache_ok)
+        if hit is not None:
+            _llm_log(f"reusing the saved {role} reply from an identical "
+                     f"earlier request ({eff_model}) — no new LLM call.")
+            return hit
+
+    if provider == LLM_PROVIDER_OPENAI:
+        reply = _openai_chat((static_prefix or "") + prompt, eff_model,
+                             attempts=attempts, temperature=temperature)
+    else:
+        client = _make_genai_client()
+        use_cache = s.get("prompt_caching", "1") == "1"
+        reply = _genai_cached_generate(client, eff_model, static_prefix,
+                                       prompt, use_cache,
+                                       temperature=temperature)
+    if key:
+        _llm_cache_put(key, reply, role, eff_model, cache_ok)
+    return reply
+
+
+def _list_llm_models() -> dict:
+    """Model ids this install can actually name, for the panel's dropdowns.
+
+    Two different answers matter and they are rarely the same:
+
+      "advertised" — everything GET /v1/models returns. On a shared LiteLLM
+                     gateway that is the whole house catalogue.
+      "permitted"  — what THIS key may invoke. LiteLLM discloses the real
+                     list in the body of a user_model_access_denied error,
+                     which is the only reliable way to enumerate it (there
+                     is no endpoint for it). So we deliberately ask for a
+                     model that cannot exist and read the refusal.
+
+    On the office gateway the two differ by an order of magnitude (65 vs 9),
+    and picking from the advertised list is how you end up with a run that
+    dies on its first LLM call. The panel shows "permitted" and keeps
+    "advertised" only as a fallback.
+
+    Never raises: an empty result just means the dropdown falls back to a
+    free-text box, which is what every non-gateway provider gets anyway.
+    """
+    out = {"advertised": [], "permitted": []}
+    s = _get_llm_settings()
+    if s.get("provider") != LLM_PROVIDER_OPENAI:
+        return out          # no /v1/models on Vertex or a bare Gemini key
+    base = (s.get("openai_base_url") or "").strip()
+    if not base:
+        return out
+    api_key = (s.get("openai_api_key") or "").strip()
+    headers = {"User-Agent": _http_user_agent()}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    root = _openai_api_urls(base)[0].rsplit("/chat/completions", 1)[0]
+    try:
+        req = urllib.request.Request(root + "/models", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        out["advertised"] = sorted({
+            str(m.get("id", "")).strip()
+            for m in (data.get("data") or [])
+            if str(m.get("id", "")).strip() and "*" not in str(m.get("id"))})
+    except Exception:
+        pass
+
+    # The refusal carries the permitted list. A name with characters no model
+    # id uses guarantees the refusal instead of an accidental match.
+    try:
+        payload = json.dumps({
+            "model": "__fast_syncs_probe__",
+            "messages": [{"role": "user", "content": "x"}],
+        }).encode("utf-8")
+        h = dict(headers)
+        h["Content-Type"] = "application/json"
+        req = urllib.request.Request(_openai_api_urls(base)[0], data=payload,
+                                     headers=h, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            m = re.search(r"models=\[(.*?)\]", body, re.DOTALL)
+            if m:
+                out["permitted"] = sorted({
+                    x.strip().strip("'\"")
+                    for x in m.group(1).split(",") if x.strip()})
+    except Exception:
+        pass
+    return out
 
 
 def _validate_llm_config() -> None:
@@ -861,8 +1137,9 @@ def _run_emotion_enrichment(text: str,
         if status_cb:
             status_cb(f"Step4: Emotion enrichment ({language})…")
         prompt = _load_lang_prompt("Step4_Emotion_Prompt", language)
-        enriched = _llm_generate(f"\n\n{text}", model, static_prefix=prompt,
-                                 role="emotion") or ""
+        enriched = _llm_generate(
+            f"\n\n{text}", model, static_prefix=prompt, role="emotion",
+            cache_ok=lambda r: bool(_strip_code_fence(r).strip())) or ""
         enriched = _strip_code_fence(enriched).strip()
         if not enriched:
             if strict:
@@ -891,6 +1168,27 @@ def _read_syncing_prompt(language: str = TTS_DEFAULT_LANGUAGE) -> str:
     return _load_lang_prompt("SyncingPrompt", language)
 
 
+def _mapping_json_str(raw: str) -> str:
+    """The JSON object inside a mapping reply (fenced block first, else the
+    outermost {...}). Raises ValueError when there is none."""
+    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if json_match:
+        return json_match.group(1)
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        raise ValueError("No JSON found in Gemini mapping response.")
+    return json_match.group(0)
+
+
+def _mapping_reply_ok(raw: str) -> bool:
+    """Would _call_gemini_mapping be able to parse this reply? Gate for the
+    reply cache, so an unusable answer is never stored or replayed."""
+    try:
+        return isinstance(json.loads(_mapping_json_str(raw)), dict)
+    except Exception:
+        return False
+
+
 def _call_gemini_mapping(en_srt: str, te_srt: str, script_text: str,
                          model: str = GEMINI_DEFAULT_MODEL,
                          language: str = TTS_DEFAULT_LANGUAGE) -> str:
@@ -903,18 +1201,9 @@ def _call_gemini_mapping(en_srt: str, te_srt: str, script_text: str,
         f"=== Video Script ===\n{script_text}"
     )
     raw = _llm_generate(dynamic, model, static_prefix=base_prompt,
-                        role="mapping")
+                        role="mapping", cache_ok=_mapping_reply_ok)
 
-    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not json_match:
-            raise ValueError("No JSON found in Gemini mapping response.")
-        json_str = json_match.group(0)
-
-    data     = json.loads(json_str)
+    data     = json.loads(_mapping_json_str(raw))
     detailed = data.get("detailed", [])
     tag      = TTS_LANGUAGES.get(language, {}).get("tag", "BN")
     lang_key = language.lower()
