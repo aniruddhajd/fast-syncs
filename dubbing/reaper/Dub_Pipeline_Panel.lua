@@ -8806,7 +8806,23 @@ function V5.learn_final_chip(ctx)
              'learned style (one text-only AI call, no voice credits). ' ..
              'Press it when the dub is final; pressing again learns only ' ..
              'what changed.') and can then
-    V5.learn_final_request()
+    -- v0.27.1: two confirmations — what it learns goes into the shared AI
+    -- memory and steers every later AI run, so a stray click must not
+    -- teach it an unfinished dub. ShowMessageBox type 4 = Yes/No, 6 = Yes.
+    if reaper.ShowMessageBox(
+         "Learn from this dub?\n\n" ..
+         "AI mode will store every line on the timeline now (including " ..
+         "lines you regenerated) in its memory and update its learned " ..
+         "style.\n\nOnly do this when the dub is FINAL.",
+         "Learn from final dub (1 of 2)", 4) == 6
+       and reaper.ShowMessageBox(
+         "Are you sure?\n\n" ..
+         "Everything it learns is used by every future AI run for " ..
+         "this language, and it cannot be undone from the panel.\n\n" ..
+         "Yes = learn now     No = cancel",
+         "Learn from final dub (2 of 2)", 4) == 6 then
+      V5.learn_final_request()
+    end
   end
   _ui_end_disabled(ctx)
 end
