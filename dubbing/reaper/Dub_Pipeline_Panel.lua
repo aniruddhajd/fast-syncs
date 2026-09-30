@@ -843,7 +843,10 @@ local function load_settings()
   v = jval("last_audio")  if v then LAST_AUDIO = v end
   v = jval("vc_voice_id") if v then VC_VOICE_ID = v end
   v = jval("script_mode")
-  if v == "auto" or v == "have" or v == "ai" or v == "ai_test"
+  -- v0.26.1: "AI · learns" is hidden from the selector; a saved "ai"
+  -- becomes "AI · test rules" (same team and memory, plus house rules).
+  if v == "ai" then v = "ai_test" end
+  if v == "auto" or v == "have" or v == "ai_test"
      or v == "prompt_agents" or v == "eleven" then
     SCRIPT_MODE = v
   end
@@ -13946,23 +13949,15 @@ function V5.ui_source_inputs(ctx)
       'The engine transcribes the audio and runs the LLM translation ' ..
       'chain (Step 1 translate, Step 2 review, Step 3 punctuation prompts) ' ..
       'to produce the script.' },
-    { 'ai', 'AI · learns',
-      'Lekhak agents: memory of your approved lines, a translator that ' ..
-      'writes in the style it learned from your reviews, free checks ' ..
-      '(timing, numbers, script, glossary), one repair pass, a 3-critic ' ..
-      'panel on anything still failing, and a proofer that marks lines to ' ..
-      'look at (<audio>_ai_report.txt). When you approve a reviewed script ' ..
-      'it learns from your edits. Sync works exactly as in Prompt chain. ' ..
-      'Use "Pause to check" so it can learn.' },
+    -- v0.26.1: 'ai' ("AI · learns") hidden — AI · test rules replaces it.
     { 'ai_test', 'AI · test rules',
-      'A safe place to try new translation rules. Same AI team as ' ..
-      '"AI · learns" plus the prompt-mode house rules (holistic mapping, ' ..
+      'Lekhak AI agents (translator, free checks, repair, 3 critics, ' ..
+      'proofer) plus the prompt-mode house rules (holistic mapping, ' ..
       'pause and punctuation rules, the review checklist), which win over ' ..
-      'the learned style. It uses AND teaches the same memory as ' ..
-      '"AI · learns" (when you approve the script or press "Learn from ' ..
-      'final dub"), and saves everything to <audio>_TEST, so your normal ' ..
-      'AI and Prompt chain results for the same audio are never touched. ' ..
-      'Imported tracks are marked [TEST].' },
+      'the learned style. It uses and teaches the AI memory (when you ' ..
+      'approve the script or press "Learn from final dub"), and saves ' ..
+      'everything to <audio>_TEST, so Prompt chain results for the same ' ..
+      'audio are never touched. Imported tracks are marked [TEST].' },
     { 'prompt_agents', 'Prompt agents · test',
       'Your hand-written Prompt-chain files as a team of three agents: ' ..
       'Translator (Step 1), Reviewer (Step 2) and Punctuator (Step 3) ' ..
@@ -14097,9 +14092,9 @@ function V5.ui_source_inputs(ctx)
         reaper.ImGui_Dummy(ctx, 0, 6)
         reaper.ImGui_TextWrapped(ctx,
           'The prompt-mode house rules are ON and win over the learned ' ..
-          'style. This run learns into the shared AI memory (same as ' ..
-          '"AI · learns"); all files go to <audio>_TEST and tracks import ' ..
-          'as [TEST] beside your normal dub for comparison.')
+          'style. This run learns into the AI memory; all files go to ' ..
+          '<audio>_TEST and tracks import as [TEST] beside your normal ' ..
+          'dub for comparison.')
       end
       if SCRIPT_MODE == 'ai' then
         reaper.ImGui_Dummy(ctx, 0, 6)
