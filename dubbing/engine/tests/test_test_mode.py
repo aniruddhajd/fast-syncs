@@ -91,6 +91,56 @@ class Folder(unittest.TestCase):
                                                        "talk")))
 
 
+class LanguageFolders(unittest.TestCase):
+    """v0.27: one output folder per language (and per test run)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(dir=_TMP)
+        self.audio = os.path.join(self.dir, "talk.wav")
+        with open(self.audio, "wb") as f:
+            f.write(b"RIFF0000WAVE")
+
+    def test_each_language_gets_its_own_folder(self):
+        m = {}
+        out, base = de._prepare_out_dir(None, self.audio, m,
+                                        language="Marathi")
+        self.assertEqual(out, os.path.join(self.dir, "talk_Marathi"))
+        self.assertEqual(base, os.path.join(out, "talk_Marathi"))
+        self.assertNotIn("variant", m)                  # a normal run
+        hi, _ = de._prepare_out_dir(None, self.audio, {}, language="Hindi")
+        self.assertEqual(hi, os.path.join(self.dir, "talk_Hindi"))
+
+    def test_test_run_folder_has_language_and_suffix(self):
+        m = {}
+        out, base = de._prepare_out_dir(None, self.audio, m,
+                                        test=de.TEST_SUFFIX,
+                                        language="Marathi")
+        self.assertEqual(out, os.path.join(self.dir, "talk_Marathi_TEST"))
+        self.assertEqual(m["variant"], "test")
+        self.assertTrue(de._is_test_base(base))
+
+    def test_copy_inside_a_run_folder_goes_beside_it(self):
+        mr, _ = de._prepare_out_dir(None, self.audio, {}, language="Marathi")
+        inner = os.path.join(mr, "talk.wav")
+        again, _ = de._prepare_out_dir(None, inner, {}, language="Marathi")
+        self.assertEqual(again, mr)                     # reused
+        hi, _ = de._prepare_out_dir(None, inner, {}, language="Hindi")
+        self.assertEqual(hi, os.path.join(self.dir, "talk_Hindi"))
+        # a pre-v0.27 <stem> folder copy also goes beside, never inside
+        old = os.path.join(self.dir, "talk")
+        os.makedirs(old, exist_ok=True)
+        ta, _ = de._prepare_out_dir(None, os.path.join(old, "talk.wav"), {},
+                                    language="Tamil")
+        self.assertEqual(ta, os.path.join(self.dir, "talk_Tamil"))
+
+    def test_unrelated_parent_folder_is_not_mistaken(self):
+        rec = os.path.join(self.dir, "talk_recordings")
+        os.makedirs(rec, exist_ok=True)
+        out, _ = de._prepare_out_dir(None, os.path.join(rec, "talk.wav"), {},
+                                     language="Marathi")
+        self.assertEqual(out, os.path.join(rec, "talk_Marathi"))
+
+
 def _learn_req(folder):
     d = tempfile.mkdtemp(dir=_TMP)
     os.makedirs(os.path.join(d, folder), exist_ok=True)

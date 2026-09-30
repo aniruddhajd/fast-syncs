@@ -996,43 +996,55 @@ def _load_pipeline_and_keys(args, need_llm=True):
     return pl, api_key
 
 
-def _prepare_out_dir(pl, audio_path, manifest, test=False):
+def _lang_suffix(language) -> str:
+    """v0.27: "_Marathi" — every run of an audio gets one folder PER
+    LANGUAGE, so dubbing the same talk into Hindi never touches Marathi."""
+    lang = re.sub(r"[^0-9A-Za-z]+", "_", str(language or "")).strip("_")
+    return "_" + lang if lang else ""
+
+
+def _run_folder_names(stem):
+    """Every folder name one of our runs of <stem> can live in: the pre-v0.27
+    <stem>, <stem>_TEST, <stem>_PTEST, and the v0.27 <stem>_<Language>
+    (+ _TEST / _PTEST). A copy of the audio inside any of them belongs to
+    the folder's PARENT — a new run never nests inside an old one."""
+    names = {stem, stem + TEST_SUFFIX, stem + PTEST_SUFFIX}
+    for lang in LANGUAGES:
+        s = stem + _lang_suffix(lang)
+        names.update((s, s + TEST_SUFFIX, s + PTEST_SUFFIX))
+    return names
+
+
+def _prepare_out_dir(pl, audio_path, manifest, test=False, language=None):
     """Create/reuse the app-convention output folder next to the audio.
 
     Done BEFORE any paid API work (cheap mkdir+copy): an unwritable input
     location (mounted DMG, read-only share) must fail fast, not after the
     S1a transcription spend. Setting manifest["out_dir"] up front also
     means even early failures write the manifest copy next to the audio.
-    Returns (out_dir, base).
+    v0.27: <src>/<stem>_<Language>/ (test runs <stem>_<Language>_TEST/),
+    every file named <stem>_<Language>_*. Returns (out_dir, base).
     """
-    if test:
-        return _prepare_test_dir(audio_path, manifest,
-                                 test if isinstance(test, str)
-                                 else TEST_SUFFIX)
-    out_dir = pl._prepare_output_dir(audio_path)
-    if not os.access(out_dir, os.W_OK):
-        raise RuntimeError(f"Output folder is not writable: {out_dir} — "
-                           "move the audio to a writable location.")
-    base = os.path.join(
-        out_dir, os.path.splitext(os.path.basename(audio_path))[0])
-    manifest["out_dir"] = out_dir
-    copied_audio = os.path.join(out_dir, os.path.basename(audio_path))
-    manifest["en_audio"] = copied_audio if os.path.exists(copied_audio) else ""
-    return out_dir, base
+    suffix = test if isinstance(test, str) else (TEST_SUFFIX if test else "")
+    return _prepare_test_dir(audio_path, manifest, suffix,
+                             _lang_suffix(language))
 
 
-def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX):
-    """v0.24 "AI · test rules": <src>/<stem>_TEST/ with every file named
-    <stem>_TEST_*, exactly as if the audio were called <stem>_TEST — so every
-    rule that says "the folder name is the base name" (the panel's cast file,
-    Regenerate's English lookup, the importers) works unchanged, and a test
-    run never overwrites the AI-mode or prompt-mode files of the same audio."""
+def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX, lang=""):
+    """<src>/<stem><lang><suffix>/ with every file named <stem><lang><suffix>_*,
+    exactly as if the audio were called that — so every rule that says "the
+    folder name is the base name" (the panel's cast file, Regenerate's
+    English lookup, the importers) works unchanged. v0.24 used it for the
+    _TEST / _PTEST test folders; v0.27 adds the language (<stem>_Marathi),
+    so each language — and each test run — keeps its own files."""
     src_dir = os.path.dirname(os.path.abspath(audio_path))
     stem = os.path.splitext(os.path.basename(audio_path))[0]
-    tname = stem + suffix
+    tname = stem + lang + suffix
     if os.path.basename(src_dir) == tname:          # the copy inside it
         out_dir = src_dir
-    elif os.path.basename(src_dir) == stem:          # the normal-run copy
+    elif os.path.basename(src_dir) in _run_folder_names(stem):
+        # the copy inside another run's folder (another language, a test
+        # run, a pre-v0.27 <stem> folder): go beside it, never inside
         out_dir = os.path.join(os.path.dirname(src_dir), tname)
     else:
         out_dir = os.path.join(src_dir, tname)
@@ -1050,7 +1062,8 @@ def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX):
         pass
     manifest["out_dir"] = out_dir
     manifest["en_audio"] = copied if os.path.exists(copied) else ""
-    manifest["variant"] = "ptest" if suffix == PTEST_SUFFIX else "test"
+    if suffix:
+        manifest["variant"] = "ptest" if suffix == PTEST_SUFFIX else "test"
     return out_dir, os.path.join(out_dir, tname)
 
 
@@ -1081,7 +1094,8 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
               "will be skipped.")
 
     out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
-                                     test=_test_suffix(args))
+                                     test=_test_suffix(args),
+                                     language=args.language)
     ctx["out_dir"], ctx["base"] = out_dir, base
     if _is_pagents(args):
         _note(f"Test mode (Prompt agents): Lekhak bypassed — the Step1-3 "
@@ -2144,7 +2158,8 @@ def _stage_translate_eleven(pl, args, api_key, manifest, ctx):
     en_srt_text, en_audio_dur, punc_result, plus el_rows (review rows)."""
     audio_path = ctx["audio_path"]
     language = args.language
-    out_dir, base = _prepare_out_dir(pl, audio_path, manifest)
+    out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
+                                     language=args.language)
     ctx["out_dir"], ctx["base"] = out_dir, base
     el_path = base + EL_DUB_SUFFIX
     for stale in (el_path, base + "_ai_draft.json", base + "_ai_report.txt",
@@ -2929,7 +2944,8 @@ def _stage_pause_plan(pl, args, api_key, manifest, ctx):
     audio_path = ctx["audio_path"]
     pause_min_s, thr_db, max_atempo, rate_override = _plan_settings(pl)
 
-    out_dir, base = _prepare_out_dir(pl, audio_path, manifest)
+    out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
+                                     language=args.language)
     ctx["out_dir"], ctx["base"] = out_dir, base
 
     # ── [S1a] Transcription — disk-cached, so Reload is free ────────────────
@@ -3456,7 +3472,8 @@ def _run_dub(args, manifest):
     _note(f"Dub voice: {voice_id} ({voice_how})")
 
     out_dir, base = _prepare_out_dir(pl, ctx["audio_path"], manifest,
-                                     test=_test_suffix(args))
+                                     test=_test_suffix(args),
+                                     language=args.language)
     ctx["out_dir"], ctx["base"] = out_dir, base
 
     # The translate stage must have run first in this out_dir.

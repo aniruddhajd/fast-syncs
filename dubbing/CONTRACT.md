@@ -168,6 +168,17 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+29. **v0.27.0: one output folder per language.** A run of `talk.wav` into
+    Marathi writes `<src>/talk_Marathi/talk_Marathi_*`; test runs use
+    `talk_Marathi_TEST` / `talk_Marathi_PTEST`. The folder name is still the
+    base name, so the importers, cast file and Regenerate lookups are
+    unchanged (`_prepare_out_dir(..., language=)` → `_prepare_test_dir`).
+    A copy of the audio inside any run folder (`talk`, `talk_<Lang>`,
+    `_TEST`/`_PTEST` variants — `_run_folder_names`) runs beside it, never
+    inside. Old `talk/` folders are left as they are and still reopen from
+    their manifests. The panel's pasted-script writer mirrors the rule
+    (`V5.lang_suffix`, `V5.is_run_folder`).
+
 28. **v0.26.0: "AI · test rules" learns; one line per chunk.**
     - **Learning:** `ai_test` now teaches the SAME shared AI memory and style
       profile as "AI · learns" (`_learns(args)`), at review or from the final

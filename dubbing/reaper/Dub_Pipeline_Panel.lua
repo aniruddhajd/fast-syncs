@@ -4747,16 +4747,36 @@ local function launch_engine(cmd, mode, header_lines, quiet)
 end
 
 -- v0.4: write the pasted translation where the engine's own outputs live.
--- Mirrors pipeline/config._prepare_output_dir: outputs go to a sibling
--- folder named after the audio file (reused when the audio already sits
--- inside its own output folder). Returns the file path, or nil + banner.
+-- Mirrors dub_engine._prepare_out_dir: v0.27 outputs go to a sibling folder
+-- <audio>_<Language> (reused when the audio already sits inside it; beside
+-- it when the audio is the copy inside another run's folder — see
+-- dub_engine._run_folder_names). Returns the file path, or nil + banner.
+function V5.lang_suffix(lang)
+  local s = tostring(lang or ""):gsub("[^%w]+", "_"):gsub("^_+", "")
+                                :gsub("_+$", "")
+  return s ~= "" and ("_" .. s) or ""
+end
+
+function V5.is_run_folder(name, stem)
+  local tails = { "", "_TEST", "_PTEST" }
+  for _, t in ipairs(tails) do
+    if name == stem .. t then return true end
+    for _, l in ipairs(LANGUAGES) do
+      if name == stem .. V5.lang_suffix(l) .. t then return true end
+    end
+  end
+  return false
+end
+
 local function write_provided_script(audio, text)
   local adir = dirname(audio)
-  local base = basename(audio):gsub("%.[^.]+$", "")
+  local stem = basename(audio):gsub("%.[^.]+$", "")
+  local base = stem .. V5.lang_suffix(LANGUAGE)
   local out_dir
   if basename(adir) == base then
     out_dir = adir
   else
+    if V5.is_run_folder(basename(adir), stem) then adir = dirname(adir) end
     out_dir = adir .. SEP .. base
     reaper.RecursiveCreateDirectory(out_dir, 0)
   end
