@@ -250,6 +250,7 @@ REQUIRED_FUNCTIONS = [
     "proof_pages",                   # advisory sentence-level proofer
     "fit_to_seconds",                # anchor sync: targeted line-fit retry
     "suggest_fits",                  # review screen: shorter options for overflows
+    "fit_chunks",                    # regen tab: one line per placed chunk
     "review_assist",                 # review screen: instruction-following assistant
     "recommend_voices",              # regen tab: AI voice recommendations
     "sync_check",                    # v0.18 sync check agent: verify + tighten offsets
@@ -307,6 +308,8 @@ PLAN_MANIFEST_KEYS = ["status", "error", "audio", "language", "out_dir",
 TEST_LLM_MANIFEST_KEYS = ["status", "error", "provider", "model", "reply"]
 # v0.18 --suggest-fit: fit suggestions for the review screen
 SUGGEST_MANIFEST_KEYS = ["status", "error", "suggest_txt", "suggest_count"]
+# v0.32 --fit-chunks (regen tab: one line per placed chunk)
+FITCH_MANIFEST_KEYS = ["status", "error", "fit_txt", "fit_count"]
 # v0.18.6 --review-assist: the review screen assistant
 ASSIST_MANIFEST_KEYS = ["status", "error", "assist_txt"]
 # v0.19 --recommend-voice: voice recommendations for the regen tab
@@ -438,6 +441,13 @@ def _parse_args():
                          "for shorter renderings of each, and write them to "
                          "<text-file>.out ('@@ <index>' then one option per "
                          "line). No audio, no TTS.")
+    ap.add_argument("--fit-chunks", dest="fit_chunks", action="store_true",
+                    help="v0.32 regen tab: write one fresh line per selected "
+                         "dub chunk, sized to its placed length. --text-file "
+                         "(UTF-8): optional CPS:/PREV:/NEXT: lines, then "
+                         "'@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per "
+                         "chunk; writes <text-file>.out ('@@ <k>' then the "
+                         "line). Text-only LLM call, no audio, no TTS.")
     ap.add_argument("--recommend-voice", dest="recommend_voice",
                     action="store_true",
                     help="v0.19: recommend voices from the account catalogue "
@@ -478,10 +488,11 @@ def _parse_args():
 
     if args.selfcheck:
         return args
-    if args.review_assist or args.recommend_voice or args.learn_final:
+    if args.review_assist or args.recommend_voice or args.learn_final \
+       or args.fit_chunks:
         if not args.language or not args.text_file:
-            ap.error("--review-assist/--recommend-voice/--learn-final "
-                     "require --language and --text-file")
+            ap.error("--review-assist/--recommend-voice/--learn-final/"
+                     "--fit-chunks require --language and --text-file")
         return args
     if args.suggest_fit:
         if args.test_llm or args.regen_chunk or args.list_voices \
@@ -570,8 +581,10 @@ def _parse_args():
 
 
 # v0.24 "AI · test rules": AI mode + the distilled prompt-mode house rules,
-# run read-only (never learns) into its own <audio>_TEST folder. Every AI-mode
-# behaviour (phrase cues, anchor sync, no prompt files) applies to it.
+# into its own <audio>_TEST folder. Every AI-mode behaviour (phrase cues,
+# anchor sync, no prompt files) applies to it. v0.26: it LEARNS into the same
+# shared AI memory + style profile as "AI · learns" (at review or from the
+# final dub, per ai_learn_at). Only Prompt agents (_PTEST) never learns.
 TEST_SUFFIX = "_TEST"
 
 
@@ -592,9 +605,16 @@ def _is_pagents(args) -> bool:
 
 
 def _is_test(args) -> bool:
-    """Test sources: never learn, own folder, [TEST]/[PTEST] tracks."""
+    """Test sources: own folder, [TEST]/[PTEST] tracks. (v0.26: only
+    Prompt agents never learns — see _learns.)"""
     return getattr(args, "script_source", "prompt") in ("ai_test",
                                                         "prompt_agents")
+
+
+def _learns(args) -> bool:
+    """v0.26: AI · learns and AI · test rules teach the shared AI memory;
+    Prompt agents (a pure prompt test) never does."""
+    return bool(_ai_source(args)) and not _is_pagents(args)
 
 
 def _house_rules_on(args) -> bool:
@@ -611,6 +631,19 @@ def _test_suffix(args):
 def _draft_mode(args) -> str:
     return "ptest" if _is_pagents(args) else ("test" if _is_test(args)
                                               else "ai")
+
+
+def _is_ptest_base(base: str) -> bool:
+    """v0.26: a Prompt-agents run (never learns): an <x>_PTEST folder or a
+    draft whose mode is "ptest". _TEST runs (AI · test rules) may learn."""
+    folder = os.path.basename(os.path.dirname(base or ""))
+    if folder.endswith(PTEST_SUFFIX):
+        return True
+    try:
+        with open((base or "") + "_ai_draft.json", "r", encoding="utf-8") as f:
+            return json.load(f).get("mode") == "ptest"
+    except Exception:
+        return False
 
 
 def _is_test_base(base: str) -> bool:
@@ -1056,8 +1089,9 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
               f"nothing is learned; results go to "
               f"{os.path.basename(out_dir)}.")
     elif _is_test(args):
-        _note(f"Test mode (AI · test rules): house rules ON, nothing is "
-              f"learned; results go to {os.path.basename(out_dir)}.")
+        _note(f"Test mode (AI · test rules): house rules ON, learns into "
+              f"the shared AI memory; results go to "
+              f"{os.path.basename(out_dir)}.")
 
     # ── [S1a] Transcribe the English audio ─────────────────────────────────
     _say("S1a", "Transcribing English audio (ElevenLabs Scribe)…")
@@ -3466,9 +3500,9 @@ def _run_dub(args, manifest):
         _note(f"WARNING: marker {marker!r} not found in "
               f"{os.path.basename(fs_path)} — FinalScript left unchanged.")
 
-    if _is_test(args):
-        _note("Test mode (AI · test rules): nothing is learned from this run.")
-    elif _ai_source(args):
+    if _is_pagents(args):
+        _note("Test mode (Prompt agents): nothing is learned from this run.")
+    elif _learns(args):
         _maybe_ai_learn(pl, args, base, script_text)
 
     # English audio duration for the sync algorithm (local decode, no API).
@@ -3642,6 +3676,63 @@ def _run_suggest_fit(args, manifest):
     manifest["suggest_txt"] = out_path
     manifest["suggest_count"] = str(total)
     _note(f"{total} suggestion(s) written.")
+
+
+def _parse_fit_chunks(text):
+    """The panel's --fit-chunks request: optional CPS:/PREV:/NEXT: header
+    lines, then '@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per chunk.
+    Returns (rows, cps, prev, next)."""
+    rows, cur, cps, prev, nxt = [], None, 0.0, "", ""
+    for line in (text or "").splitlines():
+        if line.startswith("@@"):
+            parts = line[2:].split()
+            try:
+                cur = {"k": int(parts[0]), "len": float(parts[1]),
+                       "en": "", "cur": ""}
+                rows.append(cur)
+            except (IndexError, ValueError):
+                cur = None
+        elif line.startswith("CPS:"):
+            try:
+                cps = float(line[4:].strip())
+            except ValueError:
+                pass
+        elif line.startswith("PREV:"):
+            prev = line[5:].strip()
+        elif line.startswith("NEXT:"):
+            nxt = line[5:].strip()
+        elif cur is not None and line.startswith("EN:"):
+            cur["en"] = line[3:].strip()
+        elif cur is not None and line.startswith("CUR:"):
+            cur["cur"] = line[4:].strip()
+    return rows, cps, prev, nxt
+
+
+def _run_fit_chunks(args, manifest):
+    """--fit-chunks: one fresh line per selected chunk, sized to where the
+    reviewer placed it. Text-only; UTF-8 files both ways (never argv)."""
+    manifest["fit_txt"] = ""
+    manifest["fit_count"] = "0"
+    in_path = os.path.abspath(os.path.expanduser(args.text_file))
+    if not os.path.isfile(in_path):
+        raise RuntimeError(f"--text-file not found: {in_path}")
+    rows, cps, prev, nxt = _parse_fit_chunks(_read_text(in_path))
+    if not rows:
+        raise RuntimeError("The fit request has no chunks.")
+    _note("Importing pipeline modules…")
+    pl = _import_pipeline()
+    _check_symbols(pl)
+    pl._validate_llm_config()
+    _note(f"Writing {args.language} lines for {len(rows)} placed chunk(s)…")
+    got = pl.fit_chunks(rows, args.language, cps, prev, nxt,
+                        pl.GEMINI_DEFAULT_MODEL,
+                        house_rules=_house_rules_on(args))
+    blocks = [f"@@ {k}\n{got[k]}" for k in sorted(got)]
+    out_path = in_path + ".out"
+    _write_text(out_path, "\n\n".join(blocks) + "\n")
+    manifest["fit_txt"] = out_path
+    manifest["fit_count"] = str(len(got))
+    _note(f"{len(got)} of {len(rows)} line(s) written.")
 
 
 def _run_review_assist(args, manifest):
@@ -3963,11 +4054,11 @@ def _run_learn_final(args, manifest):
     if not base or not os.path.isdir(os.path.dirname(base) or "."):
         raise RuntimeError("The learn request names no usable run folder "
                            f"(BASE: {base or '(missing)'}).")
-    if _is_test_base(base):
+    if _is_ptest_base(base):
         raise RuntimeError(
-            "This dub was made with 'AI · test rules' (a _TEST folder). Test "
-            "runs never teach AI mode — dub it with 'AI · learns' to learn "
-            "from it.")
+            "This dub was made with 'Prompt agents · test' (a _PTEST folder). "
+            "Prompt-agent runs never teach AI mode — dub it with 'AI · learns' "
+            "or 'AI · test rules' to learn from it.")
     if not chunks:
         raise RuntimeError("The learn request has no dub chunks with text.")
     out_path = in_path + ".out"
@@ -4108,7 +4199,9 @@ def main() -> int:
     if args.selfcheck:
         return _selfcheck(args)
 
-    if args.learn_final:
+    if args.fit_chunks:
+        keys, runner, ok_status = FITCH_MANIFEST_KEYS, _run_fit_chunks, "ok"
+    elif args.learn_final:
         keys, runner, ok_status = LEARNF_MANIFEST_KEYS, _run_learn_final, "ok"
     elif args.recommend_voice:
         keys, runner, ok_status = RECO_MANIFEST_KEYS, _run_recommend_voice, "ok"

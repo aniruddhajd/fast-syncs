@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """v0.24 "AI · test rules" (--script-source ai_test) — offline, no network.
 
-The test source is AI mode plus house rules that never learns and never
-shares a folder with a normal run:
+The test source is AI mode plus house rules that never shares a folder
+with a normal run (v0.26: it learns into the shared AI memory):
   * argparse accepts ai_test with the same guards as ai
   * it counts as an AI source (anchor sync, phrase cues) and is flagged test
   * results go to <src>/<stem>_TEST/<stem>_TEST_*; a re-run from the copy
     reuses it; a NORMAL run from that copy goes to the ordinary <stem> folder
-  * --learn-final refuses a _TEST run
+  * v0.26: it learns (_learns); --learn-final accepts a _TEST run and
+    refuses only a Prompt-agents _PTEST run
 
     python -m unittest dubbing/engine/tests/test_test_mode.py -v
 """
@@ -90,18 +91,38 @@ class Folder(unittest.TestCase):
                                                        "talk")))
 
 
-class NoLearning(unittest.TestCase):
-    def test_learn_final_refuses_test_run(self):
-        d = tempfile.mkdtemp(dir=_TMP)
-        os.makedirs(os.path.join(d, "a_TEST"), exist_ok=True)
-        base = os.path.join(d, "a_TEST", "a_TEST")
-        req = os.path.join(d, "req.txt")
-        with open(req, "w", encoding="utf-8") as f:
-            f.write(f"BASE: {base}\nC: 0.0|2.0|नमस्कार\n")
-        args = types.SimpleNamespace(text_file=req, language="Marathi")
+def _learn_req(folder):
+    d = tempfile.mkdtemp(dir=_TMP)
+    os.makedirs(os.path.join(d, folder), exist_ok=True)
+    base = os.path.join(d, folder, folder)
+    req = os.path.join(d, "req.txt")
+    with open(req, "w", encoding="utf-8") as f:
+        f.write(f"BASE: {base}\nC: 0.0|2.0|नमस्कार\n")
+    return types.SimpleNamespace(text_file=req, language="Marathi"), base
+
+
+class Learning(unittest.TestCase):
+    def test_test_rules_learns_prompt_agents_does_not(self):
+        self.assertTrue(de._learns(_args("ai")))
+        self.assertTrue(de._learns(_args("ai_test")))
+        self.assertFalse(de._learns(_args("prompt_agents")))
+        self.assertFalse(de._learns(_args("prompt")))
+
+    def test_learn_final_accepts_test_run(self):
+        args, base = _learn_req("a_TEST")
+        self.assertFalse(de._is_ptest_base(base))
+        sentinel = RuntimeError("reached learning")
+        with mock.patch.object(de, "_import_pipeline", side_effect=sentinel):
+            with self.assertRaises(RuntimeError) as cm:
+                de._run_learn_final(args, {})
+        self.assertIs(cm.exception, sentinel)   # past the gate
+
+    def test_learn_final_refuses_prompt_agents_run(self):
+        args, base = _learn_req("a_PTEST")
+        self.assertTrue(de._is_ptest_base(base))
         with self.assertRaises(RuntimeError) as cm:
             de._run_learn_final(args, {})
-        self.assertIn("test rules", str(cm.exception))
+        self.assertIn("Prompt agents", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -211,13 +211,14 @@ _AI_STRUCTURAL = {"EMPTY", "SCRIPT", "PASSTHROUGH"}   # lekhak unusableDraft
 _PRINCIPLES = """You are a master literary translator specializing in translating English spiritual and philosophy talks into profound, elegant, and context-aware {lang}. Your translation is a DUBBING SCRIPT: a voice artist will speak it over the original video.
 
 TRANSLATION PRINCIPLES (Broad Guidelines):
-1. Prioritize Flow over Literalism: Always prefer natural, spoken-style phrasing over formal or academic structures. If a sentence sounds 'robotic' or 'translated,' rephrase it to match the rhythm of how a native speaker would express that same thought.
-2. Capture the Intended Emotion: Focus on the speaker's core intent rather than individual words. Use evocative, culturally resonant terminology that conveys the same emotional weight as the original, even if the literal meaning differs.
+1. Natural Spoken Phrasing: Prefer natural, spoken-style phrasing over formal or academic structures. If a sentence sounds 'robotic' or 'translated,' fix the wording — but keep the English order of ideas (see 8).
+2. Capture the Intended Emotion: Focus on the speaker's core intent. Use culturally resonant terminology that carries the same emotional weight, while keeping the English meaning and every idea the speaker says.
 3. Avoid Administrative/Clinical Tone: Replace overly formal, technical, or 'dictionary' words with simpler, more relatable vocabulary that fits a conversational yet reflective context.
 4. Maintain Rhetorical Punch: Keep the speaker's wit and directness. If the original uses a rhetorical question or a punchy remark, replicate that structure rather than diluting it into a passive statement.
 5. Contextual Accuracy: In philosophical or spiritual talks, use standard, culturally accepted terminology for cosmic concepts to maintain depth, but ensure they don't break the conversational flow.
-6. Iterative Refinement: Be willing to discard 'correct' but stiff translations in favor of 'imperfect' but natural-sounding ones. Always prioritize the listener's ease of understanding the deeper meaning over grammatical rigidity.
+6. Iterative Refinement: Be willing to discard 'correct' but stiff translations in favor of natural-sounding ones — without reordering the speaker's ideas.
 7. Timing: every English cue carries its start time and duration. A paragraph must be speakable in roughly the time its cues take — shorten phrasing rather than overrun; never pad.
+8. Follow the English Order (most important for lip/voice sync): the dub is heard over the speaker, so the listener must hear each idea WHEN the speaker says it. Keep the English sequence of clauses, phrases and key words (names, numbers, key nouns, examples) as closely as {lang} grammar allows. Do not move a clause, example or key word to an earlier or later cue. Only the unavoidable grammatical shifts are allowed (e.g. the verb at the end of its own clause in an SOV language, postpositions after their noun). If the English says A, then B, then C, the {lang} says A, then B, then C.
 
 CONTEXTUAL PRECISION:
 - {glossary}
@@ -238,7 +239,7 @@ _OUTPUT_RULES = """OUTPUT FORMAT — JSON only:
 - Every cue id of a passage appears in exactly one of its paragraphs, in order.
 - Paragraph text is in LANG script only.
 - NEVER put the double-quote character " inside a text value. For quoted speech use ‘ ’ or « » instead (e.g. मी म्हणालो, ‘ही फांदी कापून टाका.’). The reply must be valid JSON.
-- PAUSES: each English cue is one spoken phrase, and the speaker pauses between cues. Inside a paragraph, write " | " (space, vertical bar, space) at the point where the English moves on to its next cue, so each stretch between markers is what is spoken during ONE cue. A paragraph of 3 cues has 2 markers. Never start or end a text with |, and never use | as sentence punctuation (use । or . as usual) — it is only this pause marker and is removed before the voice speaks.
+- PAUSES: each English cue is one spoken phrase, and the speaker pauses between cues. Inside a paragraph, write " | " (space, vertical bar, space) at the point where the English moves on to its next cue, so each stretch between markers is what is spoken during ONE cue — and carries THAT cue's words and ideas, not a neighbour's (only the verb of a clause may cross one marker when LANG grammar forces it). A paragraph of 3 cues has 2 markers. Never start or end a text with |, and never use | as sentence punctuation (use । or . as usual) — it is only this pause marker and is removed before the voice speaks.
 - Each cue shows "~N chars": about how much LANG fits its duration at the voice's speed. Aim for that length per stretch (within about 10%); never pad.
 """
 
@@ -976,6 +977,91 @@ def suggest_fits(english: str, current: str, speech_s: float, hard_s: float,
     out.sort(key=lambda t: (estimate_duration(t, language) > hard_s,
                             abs(estimate_duration(t, language) - speech_s)))
     return out[:n]
+
+
+def fit_chunks(rows, language: str, chars_per_sec: float = 0.0,
+               prev_line: str = "", next_line: str = "",
+               model: str = GEMINI_DEFAULT_MODEL,
+               house_rules: bool = False) -> dict:
+    """v0.32 Regenerate tab, "Write a line for each chunk": the reviewer has
+    placed several consecutive dub chunks on the timeline where the English
+    is spoken. Write ONE fresh line per chunk that says what the English
+    says inside that chunk's window, in the English order, sized to the
+    chunk's placed length. One call for the whole selection so the lines
+    read as one continuous speech.
+
+    rows: [{"k": int, "len": seconds, "en": str, "cur": str}] in timeline
+    order. *chars_per_sec* is the speaking rate measured on the timeline
+    (0 = the language default). Returns {k: text}; a chunk the model
+    skipped is simply absent (the panel keeps its current line)."""
+    from .config import DEFAULT_CHARS_PER_SEC, LANG_CHARS_PER_SEC
+    rows = [r for r in rows or [] if (r.get("en") or r.get("cur"))]
+    if not rows:
+        return {}
+    rate = chars_per_sec if chars_per_sec and chars_per_sec > 1 else \
+        LANG_CHARS_PER_SEC.get(language, DEFAULT_CHARS_PER_SEC)
+    no_en = "(no English under it: continue the thought of its neighbours)"
+    listing = "\n".join(
+        f"[{r['k']}] {r['len']:.1f} s, ~{max(4, int(r['len'] * rate))} chars"
+        f"\n  ENGLISH: \"{r.get('en') or no_en}\""
+        + (f"\n  CURRENT {language}: \"{r['cur']}\"" if r.get("cur") else "")
+        for r in rows)
+    prompt = (
+        f"\n\nThe reviewer selected {len(rows)} consecutive {language} dub "
+        "chunks. Each chunk's time is how long its ENGLISH takes in the "
+        "source audio (start to end of the English speech), so the "
+        f"{language} line must be spoken in that same time. "
+        "Write ONE new line per chunk:\n"
+        "- It says what the ENGLISH of that chunk says — nothing from a "
+        "neighbouring chunk, nothing left out (every name and number).\n"
+        "- It follows the English order of ideas and key words as closely "
+        f"as {language} grammar allows.\n"
+        "- It FILLS the chunk's time: about the given character count "
+        "(within about 10%). If a literal rendering is too short, use "
+        "fuller natural phrasing (a connecting word, the full form instead "
+        "of a pronoun) — never new meaning. If too long, compact the "
+        "wording — never drop meaning.\n"
+        "- [pause N s] in the English marks where the speaker pauses "
+        "inside the chunk: put a comma, or … for a pause of a second or "
+        "more, at the same point of the line. Never write the [pause] "
+        "tag itself.\n"
+        "- Read together, the lines are one natural continuous speech: a "
+        "sentence may run across chunks, so each line is the part of it "
+        "spoken in that window.\n"
+        "- CURRENT is only context; rewrite freely.\n"
+        "- No pause markers (|), no commentary.\n\n"
+        + (f"LINE BEFORE THE SELECTION: \"{prev_line}\"\n" if prev_line else "")
+        + "CHUNKS:\n" + listing + "\n"
+        + (f"LINE AFTER THE SELECTION: \"{next_line}\"\n" if next_line else "")
+        + f"\nReply with JSON only: {{\"lines\": [{{\"k\": <chunk number>, "
+        f"\"text\": \"<{language} line>\"}}]}}")
+    prof = load_profile(language)
+    try:
+        data = _parse_json_reply(_llm_generate(
+            prompt, model,
+            static_prefix=build_static_prefix(language, prof,
+                                              output_rules=False,
+                                              house_rules=house_rules),
+            role="translate", temperature=0.3))
+    except Exception:                                # noqa: BLE001
+        return {}
+    wanted = {int(r["k"]) for r in rows}
+    out = {}
+    lines = data.get("lines") if isinstance(data, dict) else data
+    for ln in lines if isinstance(lines, list) else []:
+        if not isinstance(ln, dict):
+            continue
+        try:
+            k = int(ln.get("k"))
+        except (TypeError, ValueError):
+            continue
+        text = str(ln.get("text") or "")
+        # Never voice a copied [pause N s] tag.
+        text = re.sub(r"\[\s*pause[^\]]*\]", " ", text, flags=re.I)
+        text = " ".join(split_pause_markers(text)[0].split())
+        if k in wanted and text and k not in out:
+            out[k] = text
+    return out
 
 
 def recommend_voices(language: str, voices, line: str = "", english: str = "",

@@ -168,6 +168,22 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+28. **v0.26.0: "AI · test rules" learns; one line per chunk.**
+    - **Learning:** `ai_test` now teaches the SAME shared AI memory and style
+      profile as "AI · learns" (`_learns(args)`), at review or from the final
+      dub per `ai_learn_at`. Files still go to `<audio>_TEST`, tracks still
+      import as `[TEST]`. `--learn-final` refuses only a Prompt-agents run
+      (`_is_ptest_base`: a `_PTEST` folder or draft `mode: "ptest"`); the
+      panel's "Learn from final dub" is disabled only for `_PTEST` folders
+      (`V5.is_ptest_dir`). Prompt agents still never learns.
+    - **House rules:** `_common.md` Case 1 / review now keep each idea under
+      its own English pulse (only the SOV verb may cross a ` | `).
+    - **`--fit-chunks`** (Regenerate tab, several chunks selected): one fresh
+      line per chunk, sized to its placed length. Request and answer are
+      UTF-8 files (`--text-file`, `<request>.out`); manifest
+      `{status, error, fit_txt, fit_count}`. Text-only; `run_dub.py`
+      forwards it (plus `--script-source ai_test` for house rules).
+
 27. **v0.25.0: "Prompt agents · test" — `--script-source prompt_agents`.**
     The Prompt-chain files as an agent team, Lekhak bypassed, AI-mode sync.
     - `pipeline/prompt_agents.py`: per page (the AI-mode English phrase
