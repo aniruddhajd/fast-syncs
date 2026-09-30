@@ -906,7 +906,12 @@ def fit_to_seconds(english: str, current: str, seconds: float,
     meaning, in the learned house voice. Returns the new line, or "" when
     the model gave nothing usable (the caller keeps the original)."""
     prof = load_profile(language)
-    target_chars = max(8, int(seconds * 11.0))
+    try:                              # v0.28: the measured speaking speed
+        from .sync_learn import learned_cps
+        cps = learned_cps(language) or 11.0
+    except Exception:                                    # noqa: BLE001
+        cps = 11.0
+    target_chars = max(8, int(seconds * cps))
     prompt = (
         f"\n\nThis {language} dubbing line is too long to speak in "
         f"{seconds:.1f} seconds. Rewrite it so it fits (about "

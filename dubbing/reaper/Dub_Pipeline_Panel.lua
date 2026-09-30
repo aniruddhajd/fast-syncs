@@ -3455,6 +3455,26 @@ function V5.set_item_text(item, text)
   reaper.GetSetMediaItemInfo_String(item, "P_NOTES", "", true)
 end
 
+-- v0.28: which engine piece a dub clip is (timestamps index) and the
+-- region offset the importer added — "Learn from final dub" compares where
+-- the user left the clip with that piece's English start.
+V5.ITEM_PIECE_KEY = "P_EXT:fastsyncs_piece"
+
+function V5.set_item_piece(item, index, offset)
+  reaper.GetSetMediaItemInfo_String(item, V5.ITEM_PIECE_KEY,
+    string.format("%d|%.3f", index or 0, offset or 0), true)
+end
+
+function V5.get_item_piece(item)
+  local ok, v = reaper.GetSetMediaItemInfo_String(item, V5.ITEM_PIECE_KEY,
+                                                  "", false)
+  if not ok or not v or v == "" then return nil end
+  local idx, off = v:match("^(%d+)|(%-?[%d%.]+)$")
+  idx = tonumber(idx or "")
+  if not idx or idx < 1 then return nil end
+  return idx, tonumber(off or "") or 0
+end
+
 function V5.get_item_text(item)
   local ok, t = reaper.GetSetMediaItemInfo_String(item, V5.ITEM_TEXT_KEY,
                                                   "", false)
@@ -3591,6 +3611,7 @@ local function import_to_timeline(m)
                                  string.format("chunk %02d", e.index or i))
         if it then
           chunks_added = chunks_added + 1
+          V5.set_item_piece(it, e.index or i, off)
           local note = note_for(e, #synced_entries, i)
           if note ~= "" then
             V5.set_item_text(it, note)
@@ -3611,6 +3632,7 @@ local function import_to_timeline(m)
                                  string.format("unsync %02d", e.index or i))
         if it then
           unsync_added = unsync_added + 1
+          V5.set_item_piece(it, e.index or i, off)
           local note = note_for(e, #unsync_entries, i)
           if note ~= "" then
             V5.set_item_text(it, note)
@@ -5166,6 +5188,13 @@ function V5.learn_final_request()
   for _, r in ipairs(rows) do
     lines[#lines + 1] = string.format('C: %.3f|%.3f|%s', r.pos, r.len,
                                       (tostring(r.text):gsub('%s+', ' ')))
+  end
+  -- v0.28: which engine piece each clip is, for learning the timing.
+  for _, r in ipairs(rows) do
+    if r.piece then
+      lines[#lines + 1] = string.format('P: %d|%.3f|%.3f|%.3f', r.piece,
+                                        r.pos, r.len, r.off or 0)
+    end
   end
   local path = _regen_out_dir .. SEP .. '_learn_final.txt'
   local f = io.open(path, 'wb')
@@ -7446,9 +7475,11 @@ local function _finish_run(exit_code)
         local k, v = line:gsub('\r$', ''):match('^(%u[%u_]*):%s*(.*)$')
         if k then got[k] = v end
       end
+      local sync_msg = (got.SYNC or '') ~= '' and ('\nTiming: ' .. got.SYNC)
+                       or ''
       if got.SKIPPED == '1' then
-        ui_set_banner("info", "This final dub was already learned — " ..
-                              "nothing changed since the last time.")
+        ui_set_banner("info", "This final dub's wording was already " ..
+                              "learned." .. sync_msg)
       else
         local held = tonumber(got.HELD or '') or 0
         ui_set_banner(held > 0 and "warn" or "info", string.format(
@@ -7457,7 +7488,7 @@ local function _finish_run(exit_code)
           got.HELD or '0',
           held > 0 and " (they lost numbers or half their text)" or '',
           (got.NOTE or '') ~= '' and got.NOTE ~= 'learned'
-            and ('\n' .. got.NOTE) or ''))
+            and ('\n' .. got.NOTE) or '') .. sync_msg)
       end
     else
       ui_set_banner("error", "Learning from the final dub failed:\n" ..
@@ -8197,8 +8228,10 @@ function V5.final_dub_rows()
       local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
       local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
       if txt ~= "" and (not in_span or (pos >= lo - 1 and pos <= hi + 1)) then
+        local piece, poff = V5.get_item_piece(it)
         rows[#rows + 1] = { pos = pos, len = len,
-                            text = (txt:gsub("[\r\n]+", " ")) }
+                            text = (txt:gsub("[\r\n]+", " ")),
+                            piece = piece, off = poff }
         if not in_span then
           lo = math.min(lo, pos); hi = math.max(hi, pos + len)
         end
@@ -8813,7 +8846,8 @@ function V5.learn_final_chip(ctx)
          "Learn from this dub?\n\n" ..
          "AI mode will store every line on the timeline now (including " ..
          "lines you regenerated) in its memory and update its learned " ..
-         "style.\n\nOnly do this when the dub is FINAL.",
+         "style. It also learns your TIMING: where you placed the clips " ..
+         "compared with the English.\n\nOnly do this when the dub is FINAL.",
          "Learn from final dub (1 of 2)", 4) == 6
        and reaper.ShowMessageBox(
          "Are you sure?\n\n" ..

@@ -273,6 +273,10 @@ REQUIRED_FUNCTIONS = [
     "download_dubbed_audio", "speaker_voices",
     # v0.25 Prompt agents (--script-source prompt_agents)
     "prompt_agents_translate",
+    # v0.28 sync feedback loops (pipeline/sync_learn.py)
+    "learned_bias", "bias_windows", "merge_bias", "merge_cps",
+    "load_sync_profile", "save_sync_profile", "loop_score", "loop_offenders",
+    "loop_better",
 ]
 REQUIRED_ATTRIBUTES = [
     "GEMINI_DEFAULT_MODEL",
@@ -819,12 +823,13 @@ def _import_pipeline():
                           pausechunk, preview_html, ai_translator,
                           ai_lang, ai_checks, ai_memory, ai_agents,
                           sync_check, anchor_align, spectral_vad,
-                          el_dubbing, prompt_agents)
+                          el_dubbing, prompt_agents, sync_learn)
     ns = types.SimpleNamespace()
     for mod in (config, stt, srt_tools, llm, tts, sync, match, agent_splitter,
                 agent_aligner, pausechunk, preview_html, ai_lang, ai_checks,
                 ai_memory, ai_agents, ai_translator, sync_check,
-                anchor_align, spectral_vad, el_dubbing, prompt_agents):
+                anchor_align, spectral_vad, el_dubbing, prompt_agents,
+                sync_learn):
         for name, value in vars(mod).items():
             if name.startswith("__"):
                 continue
@@ -1631,7 +1636,10 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
     # ── [S3d] placement + order sweep + files ───────────────────────────────
     _say("S3d", "Placing pieces into their English slots…")
     durations = [(e - s) / 1000.0 for (s, e) in spans]
+    en_wins = None
     if grain != "section":
+        en_wins = [p.get("win") for p in pieces]
+        pieces = _apply_learned_bias(pl, args, pieces)
         placed = pl.agentic_place_pieces(pieces, durations, en_entries, language,
                                          pl.GEMINI_DEFAULT_MODEL, api_key=api_key,
                                          voice_id=voice_id, el_model=args.el_model,
@@ -1662,6 +1670,8 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
         " ".join((t or "").split()) or EMPTY_PARAGRAPH_PLACEHOLDER
         for t in texts) + "\n")
     manifest["sync_texts"] = texts_path
+    if en_wins is not None and len(en_wins) == len(placed):
+        _write_sync_pieces(base, en_wins, texts, durations, placed)
 
     synced_entries = [e for e in entries if e["sync_status"] == "synced"]
     unsynced_n = len(entries) - len(synced_entries)
@@ -2024,6 +2034,11 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
     _say("S3c", "No EN <-> script mapping prompt: phrase alignment by "
                 "duration, guided by the translator's paragraph windows.")
 
+    # v0.28: the learned start bias (from "Learn from final dub") shifts
+    # every target; the ENGLISH windows are kept for _sync_pieces.json.
+    en_wins = [p["win"] for p in pieces]
+    pieces = _apply_learned_bias(pl, args, pieces)
+
     # ── [S3d] fit: stretch -> targeted retry -> stretch, then place ─────────
     _say("S3d", "Fitting pieces to their slots…")
     wins = [p["win"] for p in pieces]
@@ -2037,6 +2052,7 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
             nxt = min(audio_end, b + 2.0) if audio_end > b else b + 1.0
         return max(0.3, max(b, nxt) - a)
 
+    speed_paras = set()
     if not pl.PYDUB_AVAILABLE:
         _say("S3d", "WARNING: pydub unavailable — pieces are placed at their "
                     "synthesized length (no stretch, no fit retry).")
@@ -2048,6 +2064,7 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
         # v0.18.6: the reviewer's per-paragraph speed (review assistant /
         # speed buttons) is applied first, so fitting sees the real length.
         speeds = _row_speeds(base)
+        speed_paras = set(speeds or ())
         if speeds:
             n_sp = 0
             for i, p in enumerate(pieces):
@@ -2059,78 +2076,305 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
             _say("S3d", f"Reviewer speed applied to {n_sp} piece(s) in "
                         f"{len(speeds)} paragraph(s).")
         changes = []
-        over = [i for i, sg in enumerate(segs)
-                if len(sg) / 1000.0 > _slot(i) * max_atempo + 0.25]
-        if over and retry_on and retry_cap > 0:
-            todo = over[:retry_cap]
-            _say("S3d", f"{len(over)} piece(s) too long even at "
-                        f"{max_atempo:.2f}x — asking the translator agent to "
-                        f"fit {len(todo)} of them…")
-            new_texts, idxs = [], []
+        fit_used = [0]
+
+        def _fit_retry(todo, budget_of):
+            """The translator agent's targeted retry: shorten pieces *todo*
+            to budget_of(i) seconds and re-voice them in ONE TTS call.
+            texts/segs change in place; returns the indices changed. All
+            calls together stay within ai_fit_retry_max."""
+            todo = list(todo)[:max(0, retry_cap - fit_used[0])]
+            if not todo:
+                return []
+            fit_used[0] += len(todo)
+            new_texts, idxs, done = [], [], []
             for i in todo:
-                budget = _slot(i) * max_atempo * 0.95
-                en = pieces[i]["en"]
-                shorter = pl.fit_to_seconds(en, texts[i], budget, language,
+                shorter = pl.fit_to_seconds(pieces[i]["en"], texts[i],
+                                            budget_of(i), language,
                                             pl.GEMINI_DEFAULT_MODEL,
                                             house_rules=_house_rules_on(args))
                 if shorter:
                     idxs.append(i)
                     new_texts.append(shorter)
-            if idxs:
-                retry_path = os.path.join(out_dir, "_fit", "retry_tts.wav")
-                os.makedirs(os.path.dirname(retry_path), exist_ok=True)
-                r_voices = ([p_voices[i] for i in idxs] if p_voices else None)
-                try:
-                    retry_path, r_spans = pl.synthesize_sentences_elevenlabs(
-                        new_texts, retry_path, api_key=api_key,
-                        voice_id=voice_id, model_id=args.el_model,
-                        voices=r_voices, status_cb=lambda m: _say("S3d", m))
-                    if len(r_spans) == len(idxs):
-                        r_audio = pl._AudioSegment.from_file(retry_path)
-                        for i, t, (s, e) in zip(idxs, new_texts, r_spans):
-                            changes.append((i, texts[i], t))
-                            texts[i] = t
-                            segs[i] = r_audio[int(s):int(e)]
-                    else:
-                        _say("S3d", "WARNING: re-voicing returned the wrong "
-                                    "number of lines — keeping the originals.")
-                except Exception as e:                       # noqa: BLE001
-                    _say("S3d", f"WARNING: fit retry synthesis failed ({e}) — "
-                                "keeping the original lines.")
-            if changes:
-                _write_text(base + "_ai_fit_changes.txt", "\n\n".join(
-                    f"Piece {i + 1}\nAPPROVED: {old}\nSPOKEN:   {new}"
-                    for i, old, new in changes) + "\n")
-                _say("S3d", f"{len(changes)} line(s) shortened to fit — the "
-                            "approved and spoken wording is listed in "
-                            f"{os.path.basename(base)}_ai_fit_changes.txt.")
+            if not idxs:
+                return done
+            retry_path = os.path.join(out_dir, "_fit", "retry_tts.wav")
+            os.makedirs(os.path.dirname(retry_path), exist_ok=True)
+            r_voices = ([p_voices[i] for i in idxs] if p_voices else None)
+            try:
+                retry_path, r_spans = pl.synthesize_sentences_elevenlabs(
+                    new_texts, retry_path, api_key=api_key,
+                    voice_id=voice_id, model_id=args.el_model,
+                    voices=r_voices, status_cb=lambda m: _say("S3d", m))
+                if len(r_spans) == len(idxs):
+                    r_audio = pl._AudioSegment.from_file(retry_path)
+                    for i, t, (s0, e0) in zip(idxs, new_texts, r_spans):
+                        changes.append((i, texts[i], t))
+                        texts[i] = t
+                        segs[i] = r_audio[int(s0):int(e0)]
+                        done.append(i)
+                else:
+                    _say("S3d", "WARNING: re-voicing returned the wrong "
+                                "number of lines — keeping the originals.")
+            except Exception as e:                       # noqa: BLE001
+                _say("S3d", f"WARNING: fit retry synthesis failed ({e}) — "
+                            "keeping the original lines.")
+            return done
 
-        fitted, fitted_spans, stretched = None, [], 0
-        gap = pl._AudioSegment.silent(duration=pl.SECTION_GAP_MS,
-                                      frame_rate=source.frame_rate)
-        for i, sg in enumerate(segs):
-            dur_ms = max(1.0, float(len(sg)))
-            slot_ms = _slot(i) * 1000.0
-            if dur_ms > slot_ms:
-                sg = _stretch_segment(pl, sg, min(dur_ms / slot_ms, max_atempo),
-                                      out_dir, i + 1)
-                stretched += 1
-            if fitted is None:
-                fitted, start = sg, 0
-            else:
-                fitted = fitted + gap
-                start = len(fitted)
-                fitted = fitted + sg
-            fitted_spans.append((start, len(fitted)))
+        over = [i for i, sg in enumerate(segs)
+                if len(sg) / 1000.0 > _slot(i) * max_atempo + 0.25]
+        if over and retry_on and retry_cap > 0:
+            _say("S3d", f"{len(over)} piece(s) too long even at "
+                        f"{max_atempo:.2f}x — asking the translator agent to "
+                        f"fit {min(len(over), retry_cap)} of them…")
+            _fit_retry(over, lambda i: _slot(i) * max_atempo * 0.95)
+
+        def _render(cap, lead):
+            """Stretch every piece into its slot (plus lead[i] s for a piece
+            allowed to start early; ceiling cap[i], else max_atempo) and
+            join them. Returns (audio, spans ms, durations s, ratios)."""
+            fitted, f_spans, ratios = None, [], []
+            gap = pl._AudioSegment.silent(duration=pl.SECTION_GAP_MS,
+                                          frame_rate=source.frame_rate)
+            for i, sg in enumerate(segs):
+                dur_ms = max(1.0, float(len(sg)))
+                slot_ms = (_slot(i) + lead.get(i, 0.0)) * 1000.0
+                ratio = 1.0
+                if dur_ms > slot_ms:
+                    ratio = min(dur_ms / slot_ms, cap.get(i, max_atempo))
+                    sg = _stretch_segment(pl, sg, ratio, out_dir, i + 1)
+                ratios.append(ratio)
+                if fitted is None:
+                    fitted, start = sg, 0
+                else:
+                    fitted = fitted + gap
+                    start = len(fitted)
+                    fitted = fitted + sg
+                f_spans.append((start, len(fitted)))
+            return (fitted, f_spans,
+                    [(e - s0) / 1000.0 for (s0, e) in f_spans], ratios)
+
+        rendered = _render({}, {})
+        _say("S3d", f"{sum(1 for r in rendered[3] if r > 1.0)} piece(s) "
+                    f"time-stretched (ceiling {max_atempo:.2f}x).")
+        placed = pl.place_pieces(pieces, rendered[2],
+                                 log=lambda m: _say("S3d", m))
+        # v0.28: the self-correcting loop — measure, fix only the pieces
+        # still off, place again, keep a round only when it is better.
+        rendered, placed = _sync_loop(
+            pl, ctx, pieces, segs, texts, changes, rendered, placed,
+            _render, _fit_retry, _slot, max_atempo,
+            allow_revoice=bool(retry_on) and not getattr(
+                args, "provided_script", None))
+        fitted, fitted_spans, durations, ratios = rendered
         fitted.export(tts_path, format="wav")
-        durations = [(e - s) / 1000.0 for (s, e) in fitted_spans]
-        _say("S3d", f"{stretched} piece(s) time-stretched (ceiling "
-                    f"{max_atempo:.2f}x).")
+        if changes:
+            _write_text(base + "_ai_fit_changes.txt", "\n\n".join(
+                f"Piece {i + 1}\nAPPROVED: {old}\nSPOKEN:   {new}"
+                for i, old, new in changes) + "\n")
+            _say("S3d", f"{len(changes)} line(s) shortened to fit — the "
+                        "approved and spoken wording is listed in "
+                        f"{os.path.basename(base)}_ai_fit_changes.txt.")
 
-    placed = pl.place_pieces(pieces, durations, log=lambda m: _say("S3d", m))
+    if not pl.PYDUB_AVAILABLE:
+        placed = pl.place_pieces(pieces, durations,
+                                 log=lambda m: _say("S3d", m))
+        ratios = [1.0] * len(durations)
     placed = _run_sync_check(pl, ctx, pieces, placed, durations)
+    _learn_speed(pl, args, texts, durations, ratios, placed, p_voices,
+                 voice_id, skip={i for i, p in enumerate(pieces)
+                                 if p.get("para") in speed_paras})
     _write_sync_outputs(pl, args, manifest, ctx, tts_path, fitted_spans,
-                        placed, texts)
+                        placed, texts, en_wins=en_wins)
+
+
+# ─── v0.28 sync feedback loops ───────────────────────────────────────────────
+
+def _apply_learned_bias(pl, args, pieces):
+    """Shift every piece's target by the start bias learned from the user's
+    final timelines (pipeline/sync_learn). Nothing until enough samples;
+    engine_settings sync_learned_bias: 0 turns it off."""
+    if not _engine_setting("sync_learned_bias", 1, int, 0, 1):
+        return pieces
+    try:
+        bias, n = pl.learned_bias(args.language)
+    except Exception:                                    # noqa: BLE001
+        return pieces
+    if not bias:
+        return pieces
+    _say("S3d", f"Learned start bias {bias * 1000:+.0f} ms (from {n} line(s) "
+                "you placed) — every target shifted.")
+    return pl.bias_windows(pieces, bias)
+
+
+def _sync_loop(pl, ctx, pieces, segs, texts, changes, rendered, placed,
+               render, fit_retry, slot, max_atempo, allow_revoice):
+    """v0.28 self-correcting run (anchor sync): measure -> fix only the
+    pieces still off -> place again -> measure; a round is kept only when
+    it scores better (pipeline/sync_learn.loop_score), otherwise its
+    changes are undone.
+      round 1 (free): an off piece and the piece before it get
+                      sync_extra_atempo more stretch (sync_lead_ms > 0 also
+                      lets an off piece start that much before its English
+                      — off by default: real runs showed it trades on-time
+                      starts for better ends);
+      round 2:        pieces still too long are shortened and re-voiced
+                      (AI-written lines only — never a pasted script).
+    engine_settings: sync_loop (1), sync_loop_rounds (2, 0-2), sync_lead_ms
+    (0), sync_extra_atempo (0.10). Needs the sync check (sync_check=1).
+    Writes <base>_sync_loop.txt. Returns (rendered, placed)."""
+    rounds = _engine_setting("sync_loop_rounds", 2, int, 0, 2)
+    if (not rounds or not _engine_setting("sync_loop", 1, int, 0, 1)
+            or not _engine_setting("sync_check", 1, int, 0, 1)):
+        return rendered, placed
+    tol = _engine_setting("sync_tolerance_ms", 300.0, float, 50.0,
+                          2000.0) / 1000.0
+    lead_s = _engine_setting("sync_lead_ms", 0.0, float, 0.0,
+                             1000.0) / 1000.0
+    extra = _engine_setting("sync_extra_atempo", 0.10, float, 0.0, 0.5)
+    audio_end = float(ctx.get("en_audio_dur") or 0.0)
+
+    def measure(cand, durs):
+        chk, rep = pl.sync_check(pieces, cand, durs, audio_end, tol)
+        return (pl.loop_score(rep, chk, tol), pl.loop_offenders(rep, chk),
+                rep)
+
+    try:
+        score, bad, rep0 = measure(placed, rendered[2])
+    except Exception as e:                               # noqa: BLE001
+        _say("S3d", f"WARNING: sync loop skipped ({e}).")
+        return rendered, placed
+    lines = [f"Round 0 (first pass): {len(bad)} piece(s) off, "
+             f"score {score:.0f}"]
+    if not bad:
+        _say("S3d", "Sync loop: every piece is on time after the first pass.")
+    cap, lead = {}, {}
+    for rnd in range(1, rounds + 1):
+        if not bad:
+            break
+        snap = (list(texts), list(segs), len(changes))
+        cap2, lead2 = dict(cap), dict(lead)
+        for i in set(bad) | {j - 1 for j in bad if j > 0}:
+            cap2[i] = min(2.0, max(cap2.get(i, max_atempo),
+                                   max_atempo + extra))
+        if lead_s:
+            for i in bad:
+                lead2[i] = max(lead2.get(i, 0.0), lead_s)
+        how = "a little more stretch" + (", earlier start allowed"
+                                         if lead_s else "")
+        if rnd >= 2:
+            if not allow_revoice:
+                lines.append(f"Round {rnd}: skipped — this script is never "
+                             "reworded")
+                break
+
+            def budget(i):
+                return (slot(i) + lead2.get(i, 0.0)) * cap2.get(i, max_atempo)
+            # the piece before a late one is usually the one too long
+            near = sorted(set(bad) | {j - 1 for j in bad if j > 0})
+            over = [i for i in near
+                    if len(segs[i]) / 1000.0 > budget(i) + 0.05]
+            done = fit_retry(over, lambda i: budget(i) * 0.95) if over else []
+            if not done:
+                lines.append(f"Round {rnd}: nothing to re-voice (the pieces "
+                             "left are off for other reasons)")
+                break
+            how = f"shortened and re-voiced {len(done)} line(s)"
+        try:
+            cand_r = render(cap2, lead2)
+            relaxed = [dict(p, win=(float(p["win"][0]) - lead2[i],
+                                    float(p["win"][1])))
+                       if i in lead2 and p.get("win") else p
+                       for i, p in enumerate(pieces)]
+            cand_p = pl.place_pieces(relaxed, cand_r[2])
+            s2, bad2, rep2 = measure(cand_p, cand_r[2])
+        except Exception as e:                           # noqa: BLE001
+            texts[:], segs[:] = snap[0], snap[1]
+            del changes[snap[2]:]
+            lines.append(f"Round {rnd}: failed ({e}) — previous placement kept")
+            break
+        # never trade away a synced piece or on-time starts: offline
+        # replays of real runs showed rounds that fixed ends that way
+        keep = (pl.loop_better(s2, bad2, score, bad)
+                and rep2.get("synced", 0) >= rep0.get("synced", 0)
+                and rep2.get("mean_offset_ms", 0)
+                <= rep0.get("mean_offset_ms", 0) + 5)
+        lines.append(f"Round {rnd} ({how}): {len(bad)} -> {len(bad2)} "
+                     f"piece(s) off, score {score:.0f} -> {s2:.0f} — "
+                     + ("kept" if keep else "dropped"))
+        _say("S3d", f"Sync loop round {rnd}: {len(bad)} off -> {len(bad2)} "
+                    f"off ({'kept' if keep else 'dropped'}).")
+        if keep:
+            rendered, placed = cand_r, cand_p
+            score, bad, cap, lead, rep0 = s2, bad2, cap2, lead2, rep2
+        else:
+            texts[:], segs[:] = snap[0], snap[1]
+            del changes[snap[2]:]
+    lines.append(f"Final: {len(bad)} piece(s) still off"
+                 + (" — " + ", ".join(str(i + 1) for i in bad) if bad else ""))
+    try:
+        _write_text(ctx["base"] + "_sync_loop.txt", "\n".join(lines) + "\n")
+    except Exception:                                    # noqa: BLE001
+        pass
+    return rendered, placed
+
+
+def _learn_speed(pl, args, texts, durations, ratios, placed, voices,
+                 voice_id, skip=()):
+    """v0.28: the real speaking speed of this run's voice(s) — characters
+    per second of each synced piece before stretching — folded into the
+    per-language sync profile. Prompt-agents runs never learn; pieces with
+    a reviewer speed are skipped. engine_settings sync_learn_speed: 0 off."""
+    if _is_pagents(args) or not _engine_setting("sync_learn_speed", 1, int,
+                                                0, 1):
+        return
+    try:
+        by_voice = {}
+        for i, (t, d, r) in enumerate(zip(texts, durations, ratios)):
+            if i in skip or placed[i].get("status") != "synced":
+                continue
+            v = (voices[i] if voices else voice_id) or ""
+            # a stretch of r plays the speech r times faster, so the raw
+            # (as voiced) length is the placed length times r
+            by_voice.setdefault(v, []).append(
+                (len(" ".join((t or "").split())),
+                 float(d) * max(float(r), 1.0)))
+        prof = pl.load_sync_profile(args.language)
+        learned = [v for v, smp in by_voice.items()
+                   if pl.merge_cps(prof, v or None, smp)]
+        if learned:
+            prof["runs"] = int(prof.get("runs") or 0) + 1
+            pl.save_sync_profile(prof)
+            _note(f"Speaking speed learned: {args.language} about "
+                  f"{float(prof.get('cps') or 0):.1f} characters/s.")
+    except Exception as e:                               # noqa: BLE001
+        _note(f"WARNING: speaking-speed learning skipped ({e}).")
+
+
+def _write_sync_pieces(base, wins, texts, durations, placed):
+    """v0.28 <base>_sync_pieces.json: every piece's ENGLISH window (before
+    any learned bias), indexed like _sync_timestamps.txt — what "Learn from
+    final dub" compares the user's final positions against."""
+    try:
+        rows = []
+        for i, w in enumerate(wins or []):
+            p = placed[i] if i < len(placed) else {}
+            rows.append({
+                "idx": i + 1,
+                "win": ([round(float(w[0]), 3), round(float(w[1]), 3)]
+                        if w else None),
+                "chars": len(" ".join((texts[i] if i < len(texts)
+                                       else "").split())),
+                "dur": (round(float(durations[i]), 3)
+                        if i < len(durations) else None),
+                "placed": (round(float(p["position"]), 3)
+                           if p.get("position") is not None else None),
+                "status": p.get("status"),
+            })
+        _write_text(base + "_sync_pieces.json",
+                    json.dumps(rows, ensure_ascii=False, indent=2))
+    except Exception as e:                               # noqa: BLE001
+        _note(f"WARNING: piece windows not saved ({e}).")
 
 
 def _el_settings():
@@ -2527,7 +2771,7 @@ def _run_sync_check(pl, ctx, pieces, placed, durations):
 
 
 def _write_sync_outputs(pl, args, manifest, ctx, tts_path, spans, placed,
-                        texts):
+                        texts, en_wins=None):
     """S3d files + S3e render for a placed piece list — the same artifacts
     and manifest keys match mode writes (timestamps with [synced]/[unsync],
     texts sidecar, synced SRT, synced-only wav)."""
@@ -2549,6 +2793,9 @@ def _write_sync_outputs(pl, args, manifest, ctx, tts_path, spans, placed,
         " ".join((t or "").split()) or EMPTY_PARAGRAPH_PLACEHOLDER
         for t in texts) + "\n")
     manifest["sync_texts"] = texts_path
+    if en_wins is not None and len(en_wins) == len(placed):
+        _write_sync_pieces(base, en_wins, texts,
+                           [(e - s0) / 1000.0 for (s0, e) in spans], placed)
     synced_entries = [e for e in entries if e["sync_status"] == "synced"]
     unsynced_n = len(entries) - len(synced_entries)
     manifest["synced_count"] = str(len(synced_entries))
@@ -3871,6 +4118,82 @@ def _parse_learn_request(text):
     return base, chunks
 
 
+def _parse_learn_pieces(text):
+    """v0.28 optional 'P: <piece>|<start>|<len>|<region offset>' lines of a
+    learn request — clips the importer stamped with their engine piece.
+    Requests from older panels have none."""
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("P:"):
+            continue
+        parts = line[2:].strip().split("|")
+        try:
+            idx, pos, ln = int(parts[0]), float(parts[1]), float(parts[2])
+            off = float(parts[3]) if len(parts) > 3 else 0.0
+        except (ValueError, IndexError):
+            continue
+        if idx > 0:
+            out.append((idx, pos, ln, off))
+    return out
+
+
+SYNC_LEARNED_SUFFIX = "_sync_learned.json"
+
+
+def _learn_sync_final(base, text, language):
+    """v0.28: learn the user's start bias from where they left the dub
+    clips (final start - English start of the same piece). Returns the
+    'SYNC: ...' line for the .out file ("" when there is nothing to say).
+    Fail-open; its own marker, so a timing-only fix is still learned when
+    the text was learned before. engine_settings sync_learn_bias: 0 off."""
+    import hashlib
+    if not _engine_setting("sync_learn_bias", 1, int, 0, 1):
+        return ""
+    final = _parse_learn_pieces(text)
+    if not final:
+        return ("SYNC: timing not learned — no original dub clips found "
+                "(import the run again with this version)")
+    pieces_path = base + "_sync_pieces.json"
+    if not os.path.isfile(pieces_path):
+        return ("SYNC: timing not learned — this run was dubbed before "
+                "v0.28 (no piece windows)")
+    try:
+        rows = json.loads(_read_text(pieces_path)) or []
+        digest = hashlib.sha256(repr(sorted(final)).encode("utf-8")).hexdigest()
+        marker_path = base + SYNC_LEARNED_SUFFIX
+        try:
+            if json.loads(_read_text(marker_path)).get("sha256") == digest:
+                return "SYNC: timing already learned from this dub"
+        except Exception:
+            pass
+        if ENGINE_DIR not in sys.path:
+            sys.path.insert(0, ENGINE_DIR)
+        from pipeline import sync_learn as sl
+        leads = sl.leads_from_final(rows, final)
+        prof = sl.load_sync_profile(language)
+        ok, n = sl.merge_bias(prof, leads)
+        if not ok:
+            return (f"SYNC: timing not learned — only {n} usable clip(s), "
+                    f"{sl.BIAS_MIN_RUN} needed")
+        prof["runs"] = int(prof.get("runs") or 0) + 1
+        sl.save_sync_profile(prof)
+        _write_text(marker_path, json.dumps({
+            "sha256": digest, "clips": n,
+            "learned_at": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2))
+        bias_ms = float(prof["start_bias_s"]) * 1000.0
+        wait = int(prof["bias_samples"]) < sl.BIAS_MIN_SAMPLES
+        _note(f"Sync learning: {n} clip(s); start bias now {bias_ms:+.0f} ms "
+              f"from {prof['bias_samples']} line(s).")
+        return (f"SYNC: learned timing from {n} clip(s); start bias "
+                f"{bias_ms:+.0f} ms"
+                + (f" (used after {sl.BIAS_MIN_SAMPLES} lines, now "
+                   f"{prof['bias_samples']})" if wait else ""))
+    except Exception as e:                               # noqa: BLE001
+        _note(f"WARNING: sync learning failed ({e}).")
+        return "SYNC: timing not learned (an error — see the log)"
+
+
 def _learn_norm(s):
     return " ".join((s or "").split())
 
@@ -4079,9 +4402,13 @@ def _run_learn_final(args, manifest):
     if not chunks:
         raise RuntimeError("The learn request has no dub chunks with text.")
     out_path = in_path + ".out"
+    # v0.28: timing first — it has its own marker, so it is learned even
+    # when this dub's text was already learned.
+    sync_line = _learn_sync_final(base, _read_text(in_path), args.language)
 
     def finish(lines):
-        _write_text(out_path, "\n".join(lines) + "\n")
+        _write_text(out_path, "\n".join(
+            lines + ([sync_line] if sync_line else [])) + "\n")
         manifest["learn_txt"] = out_path
 
     final_text = "\n\n".join(c[2] for c in chunks)

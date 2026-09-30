@@ -168,6 +168,35 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+30. **v0.28.0: sync feedback loops.**
+    - **Self-correcting run (anchor sync, `_sync_loop`):** after the first
+      place + check, the pieces still off (Un sync, start drift, end drift)
+      and the piece before each are relaxed and placed again.
+      - Round 1 is free: `sync_extra_atempo` (0.10) more stretch. `sync_lead_ms` (default 0) also allows an early start.
+      - Round 2 shortens and re-voices the still-overlong lines via `fit_to_seconds`, within `ai_fit_retry_max`. It is never used with `--provided-script`.
+      - A round is kept only if it scores better (`sync_learn.loop_score`), loses no synced piece, and does not raise the mean start offset. Otherwise it is undone.
+      - Settings `sync_loop` (1) and `sync_loop_rounds` (2) control the loop.
+      - Writes `<base>_sync_loop.txt`.
+    - **`<base>_sync_pieces.json`** (anchor and match modes):
+      `[{idx, win:[s,e], chars, dur, placed, status}]`. `idx` = the
+      `_sync_timestamps.txt` index, and `win` = the ENGLISH window before
+      any learned bias.
+    - **Clip stamp:** both importers set item `P_EXT:fastsyncs_piece` =
+      `"<idx>|<region offset>"`. Learn requests add optional
+      `P: <idx>|<start>|<len>|<offset>` lines, which old engines ignore.
+    - **Learning the start bias:** `--learn-final` computes, for each stamped clip,
+      lead = start − offset − English start.
+      - A run needs ≥ 8 clips; |lead| > 1.5 s counts as an outlier.
+      - The median is merged into a running mean, clamped to ±0.4 s.
+      - It is applied as a shift to every target (anchor and match) once 30 samples exist. Setting `sync_learned_bias`: 0 turns it off.
+      - It has its own marker `<base>_sync_learned.json`, and the `.out` file gets a `SYNC:` line.
+    - **Speaking speed:** measured on every run except Prompt agents, as the
+      characters per second of the synced pieces before stretching. It is
+      used by `fit_to_seconds` instead of the fixed 11 cps. Setting `sync_learn_speed` controls it.
+    - **Storage:** `<AI_LEARNING_DIR>/sync/<lang>.json` `{version,
+      language, start_bias_s, bias_samples, cps, cps_seconds, voices, runs,
+      updated}`. It is kept apart from the text profile.
+
 29. **v0.27.0: one output folder per language.** A run of `talk.wav` into
     Marathi writes `<src>/talk_Marathi/talk_Marathi_*`; test runs use
     `talk_Marathi_TEST` / `talk_Marathi_PTEST`. The folder name is still the

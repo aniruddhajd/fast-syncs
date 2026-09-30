@@ -455,6 +455,13 @@ end
 -- Regenerate tab reads back this same key.
 local ITEM_TEXT_KEY = "P_EXT:fastsyncs_chunk_text"
 
+-- v0.28: the engine piece (timestamps index) of a dub clip; this importer
+-- adds no region offset. Read back by the panel's "Learn from final dub".
+local function set_item_piece(item, index)
+  reaper.GetSetMediaItemInfo_String(item, "P_EXT:fastsyncs_piece",
+    string.format("%d|0.000", index or 0), true)
+end
+
 local function set_item_text(item, text)
   reaper.GetSetMediaItemInfo_String(item, ITEM_TEXT_KEY, text or "", true)
   -- Pre-v0.8 imports wrote the text to the visible notes field; clear it.
@@ -661,6 +668,7 @@ local function main()
                                  string.format("chunk %02d", e.index or i))
         if it then
           chunks_added = chunks_added + 1
+          set_item_piece(it, e.index or i)
           local note = note_for(e, #synced_entries, i)
           if note ~= "" then
             set_item_text(it, note)
@@ -681,6 +689,7 @@ local function main()
                                  string.format("unsync %02d", e.index or i))
         if it then
           unsync_added = unsync_added + 1
+          set_item_piece(it, e.index or i)
           local note = note_for(e, #unsync_entries, i)
           if note ~= "" then
             set_item_text(it, note)
