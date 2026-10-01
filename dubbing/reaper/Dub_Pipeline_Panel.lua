@@ -6839,7 +6839,7 @@ local function apply_regen_result(wav)
   if len and len > 0 and not is_qn then V5.regen_undo.new_len = len end
   V5.log_regen_edit(reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
                     reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
-                    table.concat(old_all, " "), p.note or "", merged)
+                    V5.join_unique_texts(old_all), p.note or "", merged)
   return true
 end
 
@@ -8318,13 +8318,25 @@ function V5.regen_sel_key(sel)
   return 'multi:' .. table.concat(t, ',')
 end
 
-function V5.regen_joined_text(sel)
-  local t = {}
-  for _, it in ipairs(sel) do
-    local s = V5.get_item_text(it) or ''
-    if s:match('%S') then t[#t + 1] = (s:gsub('%s+', ' ')) end
+-- v0.28.1: a clip split (S) or copied in REAPER keeps the WHOLE text on
+-- every half, so joining the selected clips must say each text once —
+-- otherwise "regenerate as one line" voices the sentence twice.
+function V5.join_unique_texts(list)
+  local t, seen = {}, {}
+  for _, s in ipairs(list) do
+    s = tostring(s or ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')
+    if s ~= '' and not seen[s] then
+      seen[s] = true
+      t[#t + 1] = s
+    end
   end
   return table.concat(t, ' ')
+end
+
+function V5.regen_joined_text(sel)
+  local t = {}
+  for _, it in ipairs(sel) do t[#t + 1] = V5.get_item_text(it) or '' end
+  return V5.join_unique_texts(t)
 end
 
 function V5.regen_assist_state(guid)
