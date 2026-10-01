@@ -682,8 +682,8 @@ local VC_VOICE_ID = ""            -- v0.4: target voice for track voice change
 -- v0.18: one place that names the script source for every summary line.
 -- "AI" alone used to mean the prompt chain; now it is its own mode, so the
 -- prompt chain is called what it is. (V5 table member — 200-locals limit.)
--- v0.24 "AI · test rules": AI mode + the prompt-mode house rules, results
--- in <audio>_TEST; v0.26: it learns into the shared AI memory. Everything that treats AI mode
+-- v0.24 "AI · test rules": AI mode + the prompt-mode house rules, read-only
+-- (never learns), results in <audio>_TEST. Everything that treats AI mode
 -- specially asks V5.is_ai_mode(); runs are told apart by their folder.
 function V5.is_ai_mode()
   -- v0.25: "Prompt agents · test" also uses AI mode's sync (anchor sync).
@@ -692,15 +692,10 @@ function V5.is_ai_mode()
 end
 
 -- Any test run's folder: <audio>_TEST (AI · test rules) or <audio>_PTEST
--- (Prompt agents). v0.26: only _PTEST runs never learn (V5.is_ptest_dir).
+-- (Prompt agents). Test runs never learn.
 function V5.is_test_dir(dir)
   if type(dir) ~= 'string' then return false end
   return dir:gsub('[\\/]+$', ''):match('_P?TEST$') ~= nil
-end
-
-function V5.is_ptest_dir(dir)
-  if type(dir) ~= 'string' then return false end
-  return dir:gsub('[\\/]+$', ''):match('_PTEST$') ~= nil
 end
 
 -- Only AI · test rules (_TEST, not _PTEST) carries the house rules into
@@ -843,10 +838,7 @@ local function load_settings()
   v = jval("last_audio")  if v then LAST_AUDIO = v end
   v = jval("vc_voice_id") if v then VC_VOICE_ID = v end
   v = jval("script_mode")
-  -- v0.26.1: "AI · learns" is hidden from the selector; a saved "ai"
-  -- becomes "AI · test rules" (same team and memory, plus house rules).
-  if v == "ai" then v = "ai_test" end
-  if v == "auto" or v == "have" or v == "ai_test"
+  if v == "auto" or v == "have" or v == "ai" or v == "ai_test"
      or v == "prompt_agents" or v == "eleven" then
     SCRIPT_MODE = v
   end
@@ -1631,7 +1623,7 @@ local _run_mode        = "full"    -- full | translate | dub | regen |
 -- Utility modes never own the phase state: they report back into the phase
 -- they were launched from and leave the last run's manifest untouched.
 local UTIL_MODES = { regen = true, test_llm = true, list_voices = true, suggest = true, assist = true, reco = true,
-                     learnf = true, fitchunks = true,
+                     learnf = true,
                      voice_change = true, tts = true, preview = true }
 local _util_return_phase = "setup" -- phase to return to when test/fetch ends
 
@@ -1659,9 +1651,6 @@ function V5.quiet_label()
   if V5.quiet_job == "assist" then return "The assistant is answering" end
   if V5.quiet_job == "reco" then return "Recommending voices" end
   if V5.quiet_job == "learnf" then return "Learning from the final dub" end
-  if V5.quiet_job == "fitchunks" then return "Writing a line for each chunk" end
-  if V5.quiet_job == "tighten" then return "Shortening the pauses" end
-  if V5.quiet_job == "clearmem" then return "Clearing memory" end
   return "Still fetching the ElevenLabs voices"
 end
 
@@ -3090,10 +3079,6 @@ local MANIFEST_KEYS = {
   "reco_txt",
   -- v0.21: --learn-final manifest (Learn from final dub summary file).
   "learn_txt",
-  -- v0.32 --fit-chunks and v0.28.2 --tighten-pauses answer files.
-  "fit_txt", "fit_count", "pause_txt", "pause_count",
-  -- v0.28.6 --clear-memory answer file.
-  "clear_txt",
   -- v0.13: pause-aware plan manifest ("status":"plan"). The counts are
   -- strings like every other numeric field here — json_field returns
   -- numbers as text and every consumer tonumber()s what it needs.
@@ -3411,7 +3396,6 @@ local function fresh_name_suffix(tag)
     local suffix = (n == 1) and "" or (" " .. n)
     if not (existing[TRACK_EN .. tag .. suffix]
             or existing[TRACK_CHUNKS .. tag .. suffix]
-            or existing[V5.TRACK_UNSYNC .. tag .. suffix]
             or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
@@ -3460,26 +3444,6 @@ function V5.set_item_text(item, text)
   -- Pre-v0.8 imports put the same text in the visible notes field; clear it
   -- so re-imported / regenerated items stop drawing over the waveform.
   reaper.GetSetMediaItemInfo_String(item, "P_NOTES", "", true)
-end
-
--- v0.28: which engine piece a dub clip is (timestamps index) and the
--- region offset the importer added — "Learn from final dub" compares where
--- the user left the clip with that piece's English start.
-V5.ITEM_PIECE_KEY = "P_EXT:fastsyncs_piece"
-
-function V5.set_item_piece(item, index, offset)
-  reaper.GetSetMediaItemInfo_String(item, V5.ITEM_PIECE_KEY,
-    string.format("%d|%.3f", index or 0, offset or 0), true)
-end
-
-function V5.get_item_piece(item)
-  local ok, v = reaper.GetSetMediaItemInfo_String(item, V5.ITEM_PIECE_KEY,
-                                                  "", false)
-  if not ok or not v or v == "" then return nil end
-  local idx, off = v:match("^(%d+)|(%-?[%d%.]+)$")
-  idx = tonumber(idx or "")
-  if not idx or idx < 1 then return nil end
-  return idx, tonumber(off or "") or 0
 end
 
 function V5.get_item_text(item)
@@ -3612,14 +3576,12 @@ local function import_to_timeline(m)
 
     if #synced_entries > 0 then
       local tr = append_named_track(TRACK_CHUNKS .. suffix)
-      V5.stamp_run_track(tr, m)
       for i, e in ipairs(synced_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
                                  string.format("chunk %02d", e.index or i))
         if it then
           chunks_added = chunks_added + 1
-          V5.set_item_piece(it, e.index or i, off)
           local note = note_for(e, #synced_entries, i)
           if note ~= "" then
             V5.set_item_text(it, note)
@@ -3633,17 +3595,13 @@ local function import_to_timeline(m)
     end
 
     if #unsync_entries > 0 then
-      -- v0.28.8: its own track, numbered like this import's Dub Chunks
-      -- (a shared "Un sync" track mixed the clips of two runs together)
-      local tr = append_named_track(V5.TRACK_UNSYNC .. suffix)
-      V5.stamp_run_track(tr, m)
+      local tr = V5.find_or_append_track(V5.TRACK_UNSYNC .. tag)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
                                  string.format("unsync %02d", e.index or i))
         if it then
           unsync_added = unsync_added + 1
-          V5.set_item_piece(it, e.index or i, off)
           local note = note_for(e, #unsync_entries, i)
           if note ~= "" then
             V5.set_item_text(it, note)
@@ -3754,18 +3712,6 @@ local function build_engine_cmd(py, opts)
   -- v0.21 learn from the final dub (request in opts.text_file).
   if opts.learn_final then
     parts[#parts + 1] = '--learn-final'
-  end
-  -- v0.32 regen tab: one line per placed chunk (request in opts.text_file).
-  if opts.fit_chunks then
-    parts[#parts + 1] = '--fit-chunks'
-  end
-  -- v0.28.2 regen tab Speed up: shorten the clips' long pauses.
-  if opts.tighten_pauses then
-    parts[#parts + 1] = '--tighten-pauses'
-  end
-  -- v0.28.6 Forget this audio / Clear all memory (request in text_file).
-  if opts.clear_memory then
-    parts[#parts + 1] = '--clear-memory'
   end
   if opts.voice_change then
     parts[#parts + 1] = '--voice-change'
@@ -4788,36 +4734,16 @@ local function launch_engine(cmd, mode, header_lines, quiet)
 end
 
 -- v0.4: write the pasted translation where the engine's own outputs live.
--- Mirrors dub_engine._prepare_out_dir: v0.27 outputs go to a sibling folder
--- <audio>_<Language> (reused when the audio already sits inside it; beside
--- it when the audio is the copy inside another run's folder — see
--- dub_engine._run_folder_names). Returns the file path, or nil + banner.
-function V5.lang_suffix(lang)
-  local s = tostring(lang or ""):gsub("[^%w]+", "_"):gsub("^_+", "")
-                                :gsub("_+$", "")
-  return s ~= "" and ("_" .. s) or ""
-end
-
-function V5.is_run_folder(name, stem)
-  local tails = { "", "_TEST", "_PTEST" }
-  for _, t in ipairs(tails) do
-    if name == stem .. t then return true end
-    for _, l in ipairs(LANGUAGES) do
-      if name == stem .. V5.lang_suffix(l) .. t then return true end
-    end
-  end
-  return false
-end
-
+-- Mirrors pipeline/config._prepare_output_dir: outputs go to a sibling
+-- folder named after the audio file (reused when the audio already sits
+-- inside its own output folder). Returns the file path, or nil + banner.
 local function write_provided_script(audio, text)
   local adir = dirname(audio)
-  local stem = basename(audio):gsub("%.[^.]+$", "")
-  local base = stem .. V5.lang_suffix(LANGUAGE)
+  local base = basename(audio):gsub("%.[^.]+$", "")
   local out_dir
   if basename(adir) == base then
     out_dir = adir
   else
-    if V5.is_run_folder(basename(adir), stem) then adir = dirname(adir) end
     out_dir = adir .. SEP .. base
     reaper.RecursiveCreateDirectory(out_dir, 0)
   end
@@ -5190,7 +5116,7 @@ end
 --   BASE: <out_dir>/<name>          the run's base path, no suffix
 --   C: <start_s>|<len_s>|<text>     one per clip, timeline order
 -- QUIET job; the engine answers <request>.out, summarised in the banner.
-function V5.learn_final_request(mode)
+function V5.learn_final_request()
   ui_clear_banner()
   local base = V5.run_base()
   if not base then
@@ -5203,18 +5129,10 @@ function V5.learn_final_request(mode)
     ui_set_banner("error", why or "No dub clips with text found.")
     return false
   end
-  -- v0.29: "script" or "sync" — the two learnings are separate buttons
-  local lines = { 'BASE: ' .. base, 'MODE: ' .. (mode or 'script') }
+  local lines = { 'BASE: ' .. base }
   for _, r in ipairs(rows) do
     lines[#lines + 1] = string.format('C: %.3f|%.3f|%s', r.pos, r.len,
                                       (tostring(r.text):gsub('%s+', ' ')))
-  end
-  -- v0.28: which engine piece each clip is, for learning the timing.
-  for _, r in ipairs(rows) do
-    if r.piece then
-      lines[#lines + 1] = string.format('P: %d|%.3f|%.3f|%.3f', r.piece,
-                                        r.pos, r.len, r.off or 0)
-    end
   end
   local path = _regen_out_dir .. SEP .. '_learn_final.txt'
   local f = io.open(path, 'wb')
@@ -6836,7 +6754,6 @@ local function apply_regen_result(wav)
   end
   reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", basename(wav), true)
   V5.set_item_text(item, p.note or "")
-  reaper.GetSetMediaItemInfo_String(item, "P_EXT:fastsyncs_tight", "", true)
   -- v0.18.9: several chunks regenerated as ONE line — the combined take now
   -- lives on the first chunk; the others go, in this same undo step, so one
   -- Ctrl+Z brings every original chunk back.
@@ -6860,7 +6777,7 @@ local function apply_regen_result(wav)
   if len and len > 0 and not is_qn then V5.regen_undo.new_len = len end
   V5.log_regen_edit(reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
                     reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
-                    V5.join_unique_texts(old_all), p.note or "", merged)
+                    table.concat(old_all, " "), p.note or "", merged)
   return true
 end
 
@@ -7496,14 +7413,9 @@ local function _finish_run(exit_code)
         local k, v = line:gsub('\r$', ''):match('^(%u[%u_]*):%s*(.*)$')
         if k then got[k] = v end
       end
-      local sync_msg = (got.SYNC or '') ~= '' and ('\nTiming: ' .. got.SYNC)
-                       or ''
-      if got.MODE == 'sync' then
-        ui_set_banner("info", (got.SYNC or '') ~= ''
-          and ("Timing: " .. got.SYNC) or "Timing: nothing to learn.")
-      elseif got.SKIPPED == '1' then
-        ui_set_banner("info", "This final dub's wording was already " ..
-                              "learned." .. sync_msg)
+      if got.SKIPPED == '1' then
+        ui_set_banner("info", "This final dub was already learned — " ..
+                              "nothing changed since the last time.")
       else
         local held = tonumber(got.HELD or '') or 0
         ui_set_banner(held > 0 and "warn" or "info", string.format(
@@ -7512,109 +7424,10 @@ local function _finish_run(exit_code)
           got.HELD or '0',
           held > 0 and " (they lost numbers or half their text)" or '',
           (got.NOTE or '') ~= '' and got.NOTE ~= 'learned'
-            and ('\n' .. got.NOTE) or '') .. sync_msg)
+            and ('\n' .. got.NOTE) or ''))
       end
     else
       ui_set_banner("error", "Learning from the final dub failed:\n" ..
-                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
-    end
-    return
-  end
-
-  -- v0.32 "Write a line for each chunk" — quiet: the lines land in the
-  -- Regenerate tab for review; nothing is voiced yet.
-  -- v0.28.6 Forget this audio / Clear all memory.
-  if _run_mode == "clearmem" then
-    if cancelled then
-      ui_set_banner("warn", "Clearing memory was cancelled.")
-    elseif m and m.status == "ok" and exit_code == 0 then
-      local msg = {}
-      for line in ((read_all(m.clear_txt) or '') .. '\n'):gmatch('([^\n]*)\n') do
-        local k, v = line:gsub('\r$', ''):match('^(%u+):%s*(.*)$')
-        if k == 'CLEARED' then msg[#msg + 1] = 'Cleared ' .. v .. '.' end
-        if k == 'BACKUP' then msg[#msg + 1] = 'Backup: ' .. v end
-      end
-      ui_set_banner("info", #msg > 0 and table.concat(msg, '\n')
-                            or "Memory cleared.")
-    else
-      ui_set_banner("error", "Clearing memory failed:\n" ..
-                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
-    end
-    return
-  end
-
-  -- v0.28.2 Speed up: swap in the takes with shortened pauses.
-  if _run_mode == "tighten" then
-    local asked = V5.tighten_guids or {}
-    V5.tighten_guids = nil
-    if cancelled then
-      ui_set_banner("warn", "Shortening the pauses was cancelled.")
-    elseif m and m.status == "ok" and exit_code == 0 then
-      local n, cut = 0, 0
-      reaper.Undo_BeginBlock()
-      reaper.PreventUIRefresh(1)
-      for line in ((read_all(m.pause_txt) or '') .. '\n'):gmatch('([^\n]*)\n') do
-        local g, nl, c, wav = line:gsub('\r$', ''):match(
-          '^T:%s*(.-)|([%d%.]+)|(%d+)|(.+)$')
-        local it   = g and _find_item_by_guid(g)
-        local take = it and reaper.GetActiveTake(it)
-        local src  = take and file_exists(wav)
-                     and reaper.PCM_Source_CreateFromFile(wav)
-        if src then
-          local rate = reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE')
-          if rate <= 0 then rate = 1.0 end
-          reaper.SetMediaItemTake_Source(take, src)
-          reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
-          reaper.SetMediaItemInfo_Value(it, "D_LENGTH",
-                                        (tonumber(nl) or 0) / rate)
-          n, cut = n + 1, cut + (tonumber(c) or 0)
-        end
-      end
-      -- every asked clip is done, shortened or not: no second request
-      for _, g in ipairs(asked) do
-        local it = _find_item_by_guid(g)
-        if it then
-          reaper.GetSetMediaItemInfo_String(it, V5.ITEM_TIGHT_KEY, "1", true)
-        end
-      end
-      reaper.PreventUIRefresh(-1)
-      reaper.UpdateArrange()
-      reaper.Undo_EndBlock("Shorten the pauses of sped-up dub chunk(s)", -1)
-      ui_set_banner("info", n > 0
-        and string.format("Speed up: long pauses shortened in %d chunk(s) " ..
-                          "(%.1f s removed). Ctrl+Z puts them back.", n,
-                          cut / 1000)
-        or "Speed up: no long pauses to shorten in the selected chunk(s).")
-    else
-      ui_set_banner("error", "Shortening the pauses failed:\n" ..
-                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
-    end
-    return
-  end
-
-  if _run_mode == "fitchunks" then
-    local F = V5.fit
-    if F then F.pending = nil end
-    if cancelled then
-      ui_set_banner("warn", "Writing chunk lines cancelled.")
-      V5.fit = nil
-    elseif m and m.status == "ok" and exit_code == 0 and F then
-      local got, n = V5.suggest_parse(m.fit_txt), 0
-      for k, opts in pairs(got) do
-        local r = F.rows[k]
-        if r and #opts > 0 then
-          r.text = table.concat(opts, ' ')
-          r.new = true
-          n = n + 1
-        end
-      end
-      ui_set_banner(n > 0 and "info" or "warn", n > 0
-        and string.format("%d of %d chunk line(s) written — check them " ..
-                          "below, then press Voice all.", n, #F.rows)
-        or "The AI returned no usable lines — try again or type them.")
-    else
-      V5.fit = nil
-      ui_set_banner("error", "Writing chunk lines failed:\n" ..
                              _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
     end
     return
@@ -7836,29 +7649,6 @@ local function _finish_run(exit_code)
     end
     _regen_pending = nil
     _ui_phase = back
-    -- v0.32 "Voice all": go on with the next chunk only if this one landed.
-    if V5.fit_queue then
-      local landed = not cancelled and m and m.status == "ok"
-                     and exit_code == 0 and (m.regen_wav or "") ~= ""
-                     and V5.regen_undo and V5.regen_undo.new_wav == m.regen_wav
-      if landed and #V5.fit_queue > 0 then
-        V5.fit_next_at = reaper.time_precise() + 1.5
-        ui_set_banner("info", string.format(
-          "Voicing chunks — %d still to go.", #V5.fit_queue))
-      else
-        if landed then
-          local late = V5.fit_layout(V5.fit)
-          ui_set_banner(late > 0 and "warn" or "info", string.format(
-            "All chunks voiced and laid out like the English — first chunk " ..
-            "start and last chunk end kept.%s Ctrl+Z undoes the layout, " ..
-            "then each chunk.", late > 0 and string.format(
-              " %d chunk(s) still overlap even at x%.2f — shorten those lines.",
-              late, V5.SPEED_MAX or 1.25) or ''))
-          V5.fit = nil
-        end
-        V5.fit_queue, V5.fit_voicing = nil, nil
-      end
-    end
     return
   end
 
@@ -8292,12 +8082,7 @@ function V5.final_dub_rows()
   end
 
   local src_tr = nil
-  -- v0.28.9: the track picked in the drop-down beside the Learn button
-  if (V5.learn_track_guid or '') ~= '' then
-    local tr = V5.track_by_guid(V5.learn_track_guid)
-    if tr and has_text(tr) then src_tr = tr end
-  end
-  local sel = (not src_tr) and reaper.CountSelectedMediaItems(0) > 0
+  local sel = reaper.CountSelectedMediaItems(0) > 0
               and reaper.GetSelectedMediaItem(0, 0) or nil
   if sel then
     local tr = reaper.GetMediaItem_Track(sel)
@@ -8326,10 +8111,8 @@ function V5.final_dub_rows()
       local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
       local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
       if txt ~= "" and (not in_span or (pos >= lo - 1 and pos <= hi + 1)) then
-        local piece, poff = V5.get_item_piece(it)
         rows[#rows + 1] = { pos = pos, len = len,
-                            text = (txt:gsub("[\r\n]+", " ")),
-                            piece = piece, off = poff }
+                            text = (txt:gsub("[\r\n]+", " ")) }
         if not in_span then
           lo = math.min(lo, pos); hi = math.max(hi, pos + len)
         end
@@ -8337,26 +8120,12 @@ function V5.final_dub_rows()
     end
   end
   add_items(src_tr, false)
-  -- v0.28.8: only the Un sync track of THIS import ("Dub Chunks 2" pairs
-  -- with "Un sync 2"); projects imported before that share one "Un sync"
-  -- track, which is used as before when no paired track exists.
-  local _, src_nm = reaper.GetSetMediaTrackInfo_String(src_tr, "P_NAME", "",
-                                                       false)
-  local want = src_nm:sub(1, #TRACK_CHUNKS) == TRACK_CHUNKS
-               and (V5.TRACK_UNSYNC .. src_nm:sub(#TRACK_CHUNKS + 1)) or nil
-  local paired, any = nil, {}
   for t = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, t)
     local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
     if tr ~= src_tr and nm:sub(1, #V5.TRACK_UNSYNC) == V5.TRACK_UNSYNC then
-      if want and nm == want then paired = tr end
-      any[#any + 1] = tr
+      add_items(tr, true)
     end
-  end
-  if paired then
-    add_items(paired, true)
-  else
-    for _, tr in ipairs(any) do add_items(tr, true) end
   end
   table.sort(rows, function(a, b) return a.pos < b.pos end)
   return rows
@@ -8430,25 +8199,13 @@ function V5.regen_sel_key(sel)
   return 'multi:' .. table.concat(t, ',')
 end
 
--- v0.28.1: a clip split (S) or copied in REAPER keeps the WHOLE text on
--- every half, so joining the selected clips must say each text once —
--- otherwise "regenerate as one line" voices the sentence twice.
-function V5.join_unique_texts(list)
-  local t, seen = {}, {}
-  for _, s in ipairs(list) do
-    s = tostring(s or ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')
-    if s ~= '' and not seen[s] then
-      seen[s] = true
-      t[#t + 1] = s
-    end
-  end
-  return table.concat(t, ' ')
-end
-
 function V5.regen_joined_text(sel)
   local t = {}
-  for _, it in ipairs(sel) do t[#t + 1] = V5.get_item_text(it) or '' end
-  return V5.join_unique_texts(t)
+  for _, it in ipairs(sel) do
+    local s = V5.get_item_text(it) or ''
+    if s:match('%S') then t[#t + 1] = (s:gsub('%s+', ' ')) end
+  end
+  return table.concat(t, ' ')
 end
 
 function V5.regen_assist_state(guid)
@@ -8466,10 +8223,7 @@ end
 function V5.regen_en_under(pos, len)
   if _regen_out_dir == '' then return '' end
   local base = _regen_out_dir:match('([^\\/]+)$') or ''
-  -- Phrase-level SRT first (see V5.fit_assign_en: the others can hold one
-  -- cue for a whole paragraph).
-  for _, name in ipairs({ base .. '_ai_phrases.srt', base .. '_sync_en.srt',
-                          base .. '.srt' }) do
+  for _, name in ipairs({ base .. '_sync_en.srt', base .. '.srt' }) do
     local p = _regen_out_dir .. SEP .. name
     if file_exists(p) then
       local parts = {}
@@ -8482,284 +8236,6 @@ function V5.regen_en_under(pos, len)
     end
   end
   return ''
-end
-
--- ─── v0.32: "Write a line for each chunk" ─────────────────────────────────
--- You select several chunks and drag/stretch each one to where its English
--- is spoken. Each chunk gets the English inside ITS window (a cue that
--- straddles two chunks goes to the one it overlaps most, so no English is
--- said twice), and one AI call writes a line per chunk sized to the length
--- you placed it at. The lines come back for review; nothing is voiced until
--- you press "Voice all", which regenerates the chunks one after another.
--- State: V5.fit = { key, rows = { {guid, pos, len, en, cur, text} }, cps }.
--- V5.fit_queue = { {guid, text}, ... } while "Voice all" is working.
-
--- English cues of the run's SRT, each given to the selected chunk it
--- overlaps most. Returns { [i] = { text, s, e } } for sel[i], where s/e are
--- the source-audio start/end of that chunk's English (the time the line has
--- to fit into).
-function V5.fit_assign_en(sel)
-  local out = {}
-  if _regen_out_dir == '' then return out end
-  local base = _regen_out_dir:match('([^\\/]+)$') or ''
-  local cues
-  -- _ai_phrases.srt first: phrase-level timings. The sync/base SRTs can hold
-  -- one cue for a whole paragraph (seen live: a single 101 s cue), which
-  -- gave the first chunk 100 s of English and threw the layout off.
-  for _, name in ipairs({ base .. '_ai_phrases.srt', base .. '_sync_en.srt',
-                          base .. '.srt' }) do
-    local p = _regen_out_dir .. SEP .. name
-    if file_exists(p) then
-      cues = parse_srt_file(p)
-      if cues and #cues > 0 then break end
-    end
-  end
-  if not cues then return out end
-  local span = {}
-  for i, it in ipairs(sel) do
-    local p = reaper.GetMediaItemInfo_Value(it, 'D_POSITION')
-    span[i] = { p, p + reaper.GetMediaItemInfo_Value(it, 'D_LENGTH') }
-  end
-  local parts = {}
-  for _, c in ipairs(cues) do
-    local best, best_ov = nil, 0.05
-    for i, s in ipairs(span) do
-      local ov = math.min(c.stop, s[2]) - math.max(c.start, s[1])
-      if ov > best_ov then best, best_ov = i, ov end
-    end
-    if best then
-      local cs, ce, ctext = c.start, c.stop, c.text
-      -- A cue far longer than the chunk it lands in (a merged paragraph):
-      -- keep only the part inside the chunk — its time clipped to the chunk,
-      -- its words cut in the same proportion.
-      local s = span[best]
-      local dur = c.stop - c.start
-      if dur > 8 and dur > 3 * (s[2] - s[1]) then
-        cs, ce = math.max(c.start, s[1]), math.min(c.stop, s[2])
-        local words = {}
-        for w in tostring(c.text):gmatch('%S+') do words[#words + 1] = w end
-        local a = math.floor((cs - c.start) / dur * #words) + 1
-        local b = math.ceil((ce - c.start) / dur * #words)
-        ctext = table.concat(words, ' ', math.max(1, a),
-                             math.min(#words, math.max(a, b)))
-      end
-      local p = parts[best] or { t = {}, s = cs, e = ce }
-      parts[best] = p
-      -- A real pause in the English inside this chunk is shown to the AI as
-      -- [pause N s], so it can pause there too (comma / …).
-      local gap = p.last and (cs - p.last) or 0
-      if gap >= 0.35 then
-        table.insert(p.t, string.format('[pause %.1f s]', gap))
-      end
-      table.insert(p.t, ctext)
-      p.last = ce
-      p.s, p.e = math.min(p.s, cs), math.max(p.e, ce)
-    end
-  end
-  for i, p in pairs(parts) do
-    out[i] = { text = table.concat(p.t, ' '), s = p.s, e = p.e }
-  end
-  return out
-end
-
--- The voice's real speaking rate, measured on the selected chunks: their
--- stored text over the length of the AUDIO they hold (not the item length —
--- you may just have stretched the item). Falls back to the global estimate.
-function V5.fit_measure_cps(sel)
-  local chars, secs = 0, 0
-  for _, it in ipairs(sel) do
-    local t = V5.get_item_text(it) or ''
-    local take = reaper.GetActiveTake(it)
-    local src = take and reaper.GetMediaItemTake_Source(take)
-    local len, is_qn = 0, false
-    if src then len, is_qn = reaper.GetMediaSourceLength(src) end
-    local rate = take and reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE') or 1
-    if rate <= 0 then rate = 1 end
-    if not is_qn and (len or 0) > 0.2 and V5.char_count(t) > 8 then
-      chars, secs = chars + V5.char_count(t), secs + len / rate
-    end
-  end
-  if secs > 0.5 and chars > 0 then return chars / secs end
-  return V5.SPEECH_CPS
-end
-
-function V5.fit_request(sel, prev_it, next_it)
-  ui_clear_banner()
-  if _regen_out_dir == '' then
-    ui_set_banner("error", "No output folder known — pick the run's " ..
-                           "engine_done.json first.")
-    return false
-  end
-  local en = V5.fit_assign_en(sel)
-  local cps = V5.fit_measure_cps(sel)
-  local one = function(x) return (tostring(x or ''):gsub('%s+', ' ')) end
-  local rows, lines = {}, {
-    string.format('CPS: %.2f', cps),
-    'PREV: ' .. one(prev_it and V5.get_item_text(prev_it) or ''),
-    'NEXT: ' .. one(next_it and V5.get_item_text(next_it) or ''),
-  }
-  local have_en = false
-  for i, it in ipairs(sel) do
-    local e = en[i]
-    local r = { guid = _item_guid(it),
-                pos = reaper.GetMediaItemInfo_Value(it, 'D_POSITION'),
-                slot = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH'),
-                en = e and e.text or '', cur = V5.get_item_text(it) or '' }
-    -- The line must fit the time the ENGLISH takes in the source audio.
-    -- Only a chunk with no English under it falls back to its item length.
-    r.en_s, r.en_e = e and e.s, e and e.e
-    r.len = (e and e.e > e.s) and (e.e - e.s) or r.slot
-    r.text = r.cur
-    rows[i] = r
-    if r.en ~= '' then have_en = true end
-    lines[#lines + 1] = string.format('@@ %d %.3f', i, r.len)
-    lines[#lines + 1] = 'EN: ' .. one(r.en)
-    lines[#lines + 1] = 'CUR: ' .. one(r.cur)
-  end
-  if not have_en then
-    ui_set_banner("error", "No English found under the selected chunks — " ..
-                           "the run's English SRT is missing, or the chunks " ..
-                           "are outside it.")
-    return false
-  end
-  local path = _regen_out_dir .. SEP .. '_fit_chunks.txt'
-  local f = io.open(path, 'wb')
-  if not f then
-    ui_set_banner("error", "Could not write:\n" .. path)
-    return false
-  end
-  f:write(table.concat(lines, '\n') .. '\n')
-  f:close()
-  local py = preflight_engine(true)
-  if not py then return false end
-  local cmd = build_engine_cmd(py, { fit_chunks = true, text_file = path,
-    language = (_regen_lang ~= '' and _regen_lang) or LANGUAGE,
-    script_source = V5.is_rules_dir(_regen_out_dir) and 'ai_test' or nil })
-  V5.fit = { key = V5.regen_sel_key(sel), rows = rows, cps = cps,
-             pending = true }
-  return launch_engine(cmd, "fitchunks", {
-    "[panel] Python : " .. py,
-    "[panel] Mode   : write a line for each of " .. #sel .. " chunk(s)",
-  }, true)
-end
-
--- "Voice all": regenerate the next queued chunk. Called once by the button
--- and again by the regen finish handler after every successful swap.
-function V5.fit_voice_next()
-  local q = V5.fit_queue
-  while q and #q > 0 do
-    local job = table.remove(q, 1)
-    local it = _find_item_by_guid(job.guid)
-    if it and (job.text or ''):match('%S') then
-      V5.fit_voicing = job.guid
-      return start_regen(it, job.text, V5.regen_voice, nil)
-    end
-  end
-  V5.fit_queue, V5.fit_voicing = nil, nil
-  return false
-end
-
--- After "Voice all": lay the new takes out like the English, inside the
--- span the selection had when Voice all was pressed.
---   * The FIRST chunk keeps its start, the LAST chunk keeps its end — the
---     group never moves past its neighbours.
---   * Every chunk in between starts at its English start, measured from the
---     first chunk's English start, so the pauses between chunks are the
---     English pauses.
---   * A take longer than its room (up to the next chunk) plays faster, up to
---     V5.SPEED_MAX, pitch kept. Shorter leaves silence = the English pause.
--- One undo step. Returns the number of chunks that still overlap.
-function V5.fit_layout(F)
-  if not (F and F.rows and F.anchor_s and F.anchor_e) then return 0 end
-  local A, B = F.anchor_s, F.anchor_e
-  local maxr = V5.SPEED_MAX or 1.25
-  local list = {}
-  for _, r in ipairs(F.rows) do
-    local it = _find_item_by_guid(r.guid)
-    local take = it and reaper.GetActiveTake(it)
-    local src = take and reaper.GetMediaItemTake_Source(take)
-    if src then
-      local slen, qn = reaper.GetMediaSourceLength(src)
-      if slen and slen > 0 and not qn then
-        list[#list + 1] = { it = it, take = take, src_len = slen, r = r }
-      end
-    end
-  end
-  local n = #list
-  if n == 0 then return 0 end
-  local en0 = list[1].r.en_s
-  local enN = list[n].r.en_e
-  -- If the English runs longer than the span you left the group (first
-  -- start → last end), squeeze the English offsets into it, so no middle
-  -- chunk can ever land past the last one.
-  local k = 1
-  if en0 and enN and enN - en0 > (B - A) and enN > en0 then
-    k = (B - A) / (enN - en0)
-  end
-  -- Wanted starts: first at A, middle at their English offset, last so it
-  -- ends at B (its length is only known once its rate is known — below).
-  for i, x in ipairs(list) do
-    if i == 1 then x.pos = A
-    elseif en0 and x.r.en_s then
-      x.pos = math.max(A, math.min(B - 0.1, A + (x.r.en_s - en0) * k))
-    else x.pos = nil end
-  end
-  -- Chunks without English: spread evenly between known neighbours.
-  for i = 2, n - 1 do
-    if not list[i].pos then
-      local j = i + 1
-      while j < n and not list[j].pos do j = j + 1 end
-      local a = list[i - 1].pos
-      local b = list[j].pos or (B - list[n].src_len)
-      list[i].pos = a + (b - a) * 1 / (j - i + 1)
-    end
-  end
-  local late = 0
-  reaper.Undo_BeginBlock()
-  reaper.PreventUIRefresh(1)
-  -- Last chunk first: its end is fixed at B.
-  local last = list[n]
-  local rate_l = 1
-  if n > 1 then
-    local prev = list[n - 1]
-    local room_l = B - (prev.pos + prev.src_len / maxr)
-    if last.src_len > room_l and room_l > 0 then
-      rate_l = math.min(maxr, last.src_len / room_l)
-    end
-  end
-  last.rate = rate_l
-  last.pos = B - last.src_len / rate_l
-  if n == 1 then last.pos, last.rate = A, 1 end
-  -- Middle chunks may not run into the next one.
-  for i = 1, n - 1 do
-    local x = list[i]
-    if i > 1 then
-      x.pos = math.min(B - 0.1, math.max(x.pos, list[i - 1].pos
-                                 + list[i - 1].src_len / list[i - 1].rate))
-    end
-    local room = list[i + 1].pos - x.pos
-    x.rate = 1
-    if room > 0 and x.src_len > room then
-      x.rate = math.min(maxr, x.src_len / room)
-    end
-    if x.src_len / x.rate > room + 0.02 then late = late + 1 end
-  end
-  for i, x in ipairs(list) do
-    if i == n and n > 1 then
-      -- Never cross the (already placed) previous chunk; if it must, it
-      -- keeps B and overlaps — counted and reported.
-      local pe = list[n - 1].pos + list[n - 1].src_len / list[n - 1].rate
-      if x.pos < pe - 0.02 then late = late + 1 end
-    end
-    reaper.SetMediaItemTakeInfo_Value(x.take, 'B_PPITCH', 1)
-    reaper.SetMediaItemTakeInfo_Value(x.take, 'D_PLAYRATE', x.rate)
-    reaper.SetMediaItemInfo_Value(x.it, 'D_LENGTH', x.src_len / x.rate)
-    reaper.SetMediaItemInfo_Value(x.it, 'D_POSITION', x.pos)
-  end
-  reaper.PreventUIRefresh(-1)
-  reaper.UpdateArrange()
-  reaper.Undo_EndBlock('Lay out voiced chunks like the English', -1)
-  return late
 end
 
 function V5.item_rate(item)
@@ -8787,53 +8263,6 @@ function V5.set_item_rate(item, f)
   return true
 end
 
--- v0.28.2: Speed up also removes pauses. The first time a clip is sped up,
--- the engine cuts its long silences (inside the line and at its end) down
--- to a short breath — same words, no API call, no credits — and the panel
--- swaps the shorter take in at the same speed. Once per take (P_EXT flag);
--- a regenerated take starts fresh.
-V5.ITEM_TIGHT_KEY = "P_EXT:fastsyncs_tight"
-
-function V5.tighten_request(items)
-  if V5.busy() or (_regen_out_dir or "") == "" then return false end
-  local lines = { 'OUT: ' .. _regen_out_dir .. SEP .. 'regen' }
-  local guids = {}
-  for _, it in ipairs(items or {}) do
-    local _, done = reaper.GetSetMediaItemInfo_String(it, V5.ITEM_TIGHT_KEY,
-                                                      "", false)
-    local take = reaper.GetActiveTake(it)
-    if done ~= "1" and take then
-      local src  = reaper.GetMediaItemTake_Source(take)
-      local path = src and reaper.GetMediaSourceFileName(src, "") or ""
-      local rate = reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE')
-      if rate <= 0 then rate = 1.0 end
-      local offs = reaper.GetMediaItemTakeInfo_Value(take, 'D_STARTOFFS')
-      local len  = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH') * rate
-      if path ~= "" and len > 0.3 then
-        local g = _item_guid(it)
-        lines[#lines + 1] = string.format('T: %s|%.3f|%.3f|%s', g, offs,
-                                          len, path)
-        guids[#guids + 1] = g
-      end
-    end
-  end
-  if #guids == 0 then return false end
-  local path = _regen_out_dir .. SEP .. '_tighten.txt'
-  local f = io.open(path, 'wb')
-  if not f then return false end
-  f:write(table.concat(lines, '\n') .. '\n')
-  f:close()
-  local py = preflight_engine(false)
-  if not py then return false end
-  local cmd = build_engine_cmd(py, { tighten_pauses = true, text_file = path,
-    language = (_regen_lang ~= '' and _regen_lang) or LANGUAGE })
-  V5.tighten_guids = guids
-  return launch_engine(cmd, "tighten", {
-    "[panel] Python : " .. py,
-    "[panel] Mode   : shorten the pauses of " .. #guids .. " sped-up chunk(s)",
-  }, true)
-end
-
 function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   local guid = key or _item_guid(item)
   local A = V5.regen_assist_state(guid)
@@ -8842,8 +8271,6 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   -- Speed applies to every selected chunk at once.
   local function set_all(f)
     for _, it in ipairs(items) do V5.set_item_rate(it, f) end
-    -- v0.28.2: faster also means shorter pauses (once per take)
-    if f > 1.001 then V5.tighten_request(items) end
   end
 
   -- Speed (instant, on the current take).
@@ -8860,9 +8287,7 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   if reaper.ImGui_SmallButton(ctx, '+##rgspup') then
     set_all(rate + (V5.SPEED_STEP or 0.05))
   end
-  V5.hint(ctx, 'Faster (up to x1.25), pitch kept. The first speed-up also ' ..
-               'shortens the long pauses inside the line (same words, no ' ..
-               'credits; Ctrl+Z puts them back).')
+  V5.hint(ctx, 'Faster (up to x1.25), pitch kept.')
   if math.abs(rate - 1.0) > 0.005 then
     reaper.ImGui_SameLine(ctx, 0, 4)
     if reaper.ImGui_SmallButton(ctx, 'reset##rgsprs') then
@@ -8999,348 +8424,24 @@ end
 -- v0.21: "Learn from final dub" — AI mode learns from the timeline as it is
 -- now (V5.learn_final_request). Shared by the Regenerate tab and the success
 -- screen; disabled while the engine is busy or no run folder is known.
--- v0.28.9: tracks are stamped at import with the run they came from, so
--- the Learn drop-down can name the run and switch the panel to it.
-V5.TRACK_RUN_KEY  = "P_EXT:fastsyncs_run"
-V5.TRACK_LANG_KEY = "P_EXT:fastsyncs_lang"
-
-function V5.stamp_run_track(tr, m)
-  if not tr or not m then return end
-  reaper.GetSetMediaTrackInfo_String(tr, V5.TRACK_RUN_KEY,
-                                     m.out_dir or "", true)
-  reaper.GetSetMediaTrackInfo_String(tr, V5.TRACK_LANG_KEY,
-                                     m.language or "", true)
-end
-
-function V5.track_by_guid(guid)
-  for t = 0, reaper.CountTracks(0) - 1 do
-    local tr = reaper.GetTrack(0, t)
-    if reaper.GetTrackGUID(tr) == guid then return tr end
-  end
-  return nil
-end
-
--- Every "Dub Chunks…" track with clips: { guid, label, run, lang }.
-function V5.learn_track_options()
-  local function clips(tr)
-    local n = 0
-    for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
-      if V5.get_item_text(reaper.GetTrackMediaItem(tr, i)) ~= "" then
-        n = n + 1
-      end
-    end
-    return n
-  end
-  local names, out = {}, {}
-  for t = 0, reaper.CountTracks(0) - 1 do
-    local tr = reaper.GetTrack(0, t)
-    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
-    names[nm] = tr
-  end
-  for t = 0, reaper.CountTracks(0) - 1 do
-    local tr = reaper.GetTrack(0, t)
-    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
-    if nm:sub(1, #TRACK_CHUNKS) == TRACK_CHUNKS then
-      local n = clips(tr)
-      if n > 0 then
-        local un = names[V5.TRACK_UNSYNC .. nm:sub(#TRACK_CHUNKS + 1)]
-        local nu = un and clips(un) or 0
-        local _, run = reaper.GetSetMediaTrackInfo_String(
-          tr, V5.TRACK_RUN_KEY, "", false)
-        local _, lang = reaper.GetSetMediaTrackInfo_String(
-          tr, V5.TRACK_LANG_KEY, "", false)
-        out[#out + 1] = {
-          guid = reaper.GetTrackGUID(tr), run = run or "", lang = lang or "",
-          label = string.format('%s · %d clip%s%s · %s', nm, n,
-                                n == 1 and '' or 's',
-                                nu > 0 and (' + ' .. nu .. ' unsync') or '',
-                                (run or '') ~= '' and basename(run)
-                                  or 'run not recorded') }
-      end
-    end
-  end
-  return out
-end
-
-function V5.learn_track_ui(ctx)
-  local tracks = V5.learn_track_options()
-  local opts = { { '', 'Auto — the selected clip\'s track, else the newest' } }
-  for _, t in ipairs(tracks) do opts[#opts + 1] = { t.guid, t.label } end
-  local cur = V5.learn_track_guid or ''
-  local found = cur == ''
-  for _, t in ipairs(tracks) do if t.guid == cur then found = true end end
-  if not found then cur = '' end
-  reaper.ImGui_Text(ctx, 'Learn from track')
-  V5.hint(ctx, 'Which dub "Learn from final dub" reads. Each import has its ' ..
-               'own "Dub Chunks" track and its own "Un sync" track; the ' ..
-               'folder name is the run it came from. Picking a track also ' ..
-               'switches the panel to that run.')
-  local pick = V5.dropdown(ctx, 'learntrack', cur, opts, 520)
-  if pick ~= cur then
-    V5.learn_track_guid = pick
-    for _, t in ipairs(tracks) do
-      if t.guid == pick and t.run ~= '' and t.run ~= _regen_out_dir then
-        V5.set_regen_target(t.run, t.lang ~= '' and t.lang or _regen_lang)
-        ui_set_banner("info", "Learn will read " .. t.label .. ".")
-      end
-    end
-  end
-end
-
 function V5.learn_final_chip(ctx)
-  V5.learn_track_ui(ctx)
   local busy = V5.busy()
-  local test = V5.is_ptest_dir(_regen_out_dir)
+  local test = V5.is_test_dir(_regen_out_dir)
   local can = _regen_out_dir ~= "" and not busy and not test
-  -- v0.29: two separate learnings — the SCRIPT (words, style, corrections,
-  -- saved script) and the SYNC (where you place lines vs the English).
-  -- Each asks twice (v0.27.1): both steer every later AI run.
-  local running = V5.quiet_job == "learnf"
   _ui_begin_disabled(ctx, not can)
-  if V5.chip(ctx, (running and '… Learning' or '✦ Learn script') ..
-                  '##learnscript',
-             test and ('This is a Prompt agents run (a _PTEST folder). ' ..
-                       'Prompt-agent runs never teach AI mode.') or
-             'Teach AI mode the WORDING of the dub on the timeline now — ' ..
-             'every line, including the ones you regenerated: translation ' ..
-             'memory, word choices, style and your corrections (one ' ..
-             'text-only AI call, no voice credits). Timing is not touched.')
-     and can then
-    if reaper.ShowMessageBox(
-         "Learn the SCRIPT from this dub?\n\n" ..
-         "AI mode stores every line on the timeline now (including lines " ..
-         "you regenerated) and updates its words, style and corrections. " ..
-         "Timing is not changed.\n\nOnly do this when the text is FINAL.",
-         "Learn script (1 of 2)", 4) == 6
-       and reaper.ShowMessageBox(
-         "Are you sure?\n\nIt is used by every future AI run for this " ..
-         "language.\n\nYes = learn now     No = cancel",
-         "Learn script (2 of 2)", 4) == 6 then
-      V5.learn_final_request('script')
-    end
+  if V5.chip(ctx, (V5.quiet_job == "learnf" and '… Learning' or
+                   '✦ Learn from final dub') .. '##learnfinal',
+             test and ('This is a test run (a _TEST / _PTEST folder). ' ..
+                       'Test runs never teach AI mode.') or
+             'Teach AI mode from the dub as it is on the timeline now — ' ..
+             'including every line you regenerated after the review. ' ..
+             'Stores the lines in the translation memory and updates the ' ..
+             'learned style (one text-only AI call, no voice credits). ' ..
+             'Press it when the dub is final; pressing again learns only ' ..
+             'what changed.') and can then
+    V5.learn_final_request()
   end
   _ui_end_disabled(ctx)
-  local avail = reaper.ImGui_GetContentRegionAvail(ctx)
-  if type(avail) == 'number' and avail > V5.chip_w(ctx, '✦ Learn script')
-       + V5.chip_w(ctx, '⏱ Learn timing') + 18 then
-    reaper.ImGui_SameLine(ctx, 0, 6)
-  end
-  _ui_begin_disabled(ctx, not can)
-  if V5.chip(ctx, (running and '… Learning' or '⏱ Learn timing') ..
-                  '##learnsync',
-             test and ('This is a Prompt agents run (a _PTEST folder). ' ..
-                       'Prompt-agent runs never teach AI mode.') or
-             'Teach AI mode your TIMING: where you placed the clips compared ' ..
-             'with the English (start bias, used after about 30 lines). No ' ..
-             'AI call. The script memory is not touched.') and can then
-    if reaper.ShowMessageBox(
-         "Learn the TIMING from this dub?\n\n" ..
-         "AI mode learns where you placed the clips compared with the " ..
-         "English. The words are not changed.\n\nOnly do this when the " ..
-         "clip positions are FINAL.",
-         "Learn timing (1 of 2)", 4) == 6
-       and reaper.ShowMessageBox(
-         "Are you sure?\n\nIt shifts the placement of every future AI " ..
-         "run for this language.\n\nYes = learn now     No = cancel",
-         "Learn timing (2 of 2)", 4) == 6 then
-      V5.learn_final_request('sync')
-    end
-  end
-  _ui_end_disabled(ctx)
-  V5.clear_memory_chips(ctx)
-end
-
--- v0.28.6: "Forget this audio" (its saved script + clip positions, so the
--- next run translates it fresh) and "Clear all memory" (everything learned
--- for the language, backed up first). Local files only, no credits.
-function V5.clear_memory_chips(ctx)
-  local busy = V5.busy()
-  local lang = (_regen_lang ~= '' and _regen_lang) or LANGUAGE or ''
-  local have_run = _regen_out_dir ~= "" and V5.run_base() ~= nil
-  -- v0.28.7: own row (on the Learn row they ran off a narrow panel's edge)
-  reaper.ImGui_Dummy(ctx, 0, 2)
-  _ui_begin_disabled(ctx, busy or not have_run)
-  if V5.chip(ctx, (V5.quiet_job == "clearmem" and '… Clearing' or
-                   'Forget this audio') .. '##clearaudio',
-             'Forget the script AI mode saved for THIS audio (and where its ' ..
-             'clips sat), so the next run translates it fresh instead of ' ..
-             'reusing it. Everything learned from other talks stays.')
-     and not busy and have_run then
-    if reaper.ShowMessageBox(
-         "Forget the saved script for this audio?\n\n" ..
-         "The next run of this audio will translate it fresh. Words, style " ..
-         "and timing learned from it and from other talks stay.",
-         "Forget this audio", 4) == 6 then
-      V5.clear_memory_request('audio', lang)
-    end
-  end
-  _ui_end_disabled(ctx)
-  -- v0.29: script memory and timing memory are cleared separately.
-  local function clear_chip(scope, label, tip, what)
-    local avail = reaper.ImGui_GetContentRegionAvail(ctx)
-    if type(avail) == 'number' and avail > V5.chip_w(ctx, label) + 12 then
-      reaper.ImGui_SameLine(ctx, 0, 6)
-    end
-    _ui_begin_disabled(ctx, busy or lang == '')
-    if V5.chip(ctx, label .. '##clear' .. scope, tip, true) and not busy
-       and lang ~= '' then
-      if reaper.ShowMessageBox(
-           "Clear the " .. lang .. " " .. what .. "?\n\n" .. tip ..
-           "\n\nA backup copy is kept.",
-           label .. " (1 of 2)", 4) == 6
-         and reaper.ShowMessageBox(
-           "Are you sure?\n\nThis cannot be undone from the panel (only " ..
-           "by restoring the backup by hand).\n\n" ..
-           "Yes = clear     No = cancel", label .. " (2 of 2)", 4) == 6 then
-        V5.clear_memory_request(scope, lang)
-      end
-    end
-    _ui_end_disabled(ctx)
-  end
-  clear_chip('script', 'Clear ' .. lang .. ' script memory',
-             'Forgets every style rule, word choice, correction, saved script ' ..
-             'and line pair learned for ' .. lang .. '. Timing stays.',
-             'script memory')
-  clear_chip('sync', 'Clear ' .. lang .. ' timing memory',
-             'Forgets the learned start timing and speaking speed for ' ..
-             lang .. '. The script memory stays.', 'timing memory')
-end
-
-function V5.clear_memory_request(scope, lang)
-  ui_clear_banner()
-  local dir = (_regen_out_dir ~= '' and _regen_out_dir) or STATUS_DIR
-  local lines = { 'SCOPE: ' .. scope }
-  local base = V5.run_base()
-  if base then lines[#lines + 1] = 'BASE: ' .. base end
-  local path = dir .. SEP .. '_clear_memory.txt'
-  local f = io.open(path, 'wb')
-  if not f then
-    ui_set_banner("error", "Could not write:\n" .. path)
-    return false
-  end
-  f:write(table.concat(lines, '\n') .. '\n')
-  f:close()
-  local py = preflight_engine(false)
-  if not py then return false end
-  local cmd = build_engine_cmd(py, { clear_memory = true, text_file = path,
-                                     language = lang })
-  return launch_engine(cmd, "clearmem", {
-    "[panel] Python : " .. py,
-    "[panel] Mode   : clear memory (" .. scope .. ", " .. lang .. ")",
-  }, true)
-end
-
--- v0.32: several chunks selected — offer "Write a line for each chunk" (see
--- V5.fit_request), then the lines for review, then "Voice all".
-function V5.fit_ui(ctx, sel, prev_it, next_it, key)
-  local busy = V5.busy()
-  local F = V5.fit
-  if F and F.key ~= key and not V5.fit_queue then F = nil end
-  reaper.ImGui_Dummy(ctx, 0, 6)
-  V5.cap(ctx, 'EACH CHUNK ITS OWN LINE')
-  _grey_hint(ctx, 'Each selected chunk gets the English spoken under it, ' ..
-                  'and a fresh line sized to how long that English takes ' ..
-                  'in the source audio (its SRT start → end).')
-  local label = (V5.quiet_job == 'fitchunks' and '… Writing lines'
-                 or string.format('✦ Write a line for each chunk (%d)', #sel))
-  _ui_begin_disabled(ctx, busy or _regen_out_dir == '')
-  if reaper.ImGui_Button(ctx, label .. '##fitgo') and not busy then
-    V5.fit_request(sel, prev_it, next_it)
-  end
-  _ui_end_disabled(ctx)
-  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-    reaper.ImGui_SetTooltip(ctx, V5.wrap(
-      'One text-only AI call, no voice credits. Each chunk gets the English ' ..
-      'inside its own time window (a line that straddles two chunks goes ' ..
-      'to the one it overlaps most), in the English order, sized to the ' ..
-      'English timestamps (start → end in the source audio). Nothing is ' ..
-      'voiced until you press ' ..
-      'Voice all.'))
-  end
-  if not F or F.pending then return end
-
-  local cps = F.cps or V5.SPEECH_CPS
-  local credits, all_fit = 0, true
-  for i, r in ipairs(F.rows) do
-    reaper.ImGui_PushID(ctx, 'fitrow' .. i)
-    local est = V5.speech_secs(r.text or '', cps)
-    local fits = est <= r.len + 0.05
-    local short = fits and est < r.len * 0.8
-    if not fits then all_fit = false end
-    credits = credits + V5.credit_est(r.text or '')
-    local voicing = V5.fit_voicing == r.guid
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(),
-      voicing and V5.COL.text
-      or ((fits and not short) and V5.COL.step_ok or V5.COL.warn))
-    reaper.ImGui_Text(ctx, string.format('Chunk %d  ·  %s  ·  %s%s', i,
-      r.en_s and string.format('English %s → %s (%s)', V5.fmt_pos(r.en_s),
-                               V5.fmt_pos(r.en_e), V5.fmt_dur(r.len))
-             or (V5.fmt_dur(r.len) .. ' item (no English under it)'),
-      short and string.format('too short (~%.1f s) — add words', est)
-      or fits and string.format('fits (~%.1f s)', est)
-      or string.format('too long (~%.1f s)', est),
-      voicing and '  ·  voicing…' or ''))
-    reaper.ImGui_PopStyleColor(ctx)
-    if (r.en or '') ~= '' then
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.dimmer)
-      reaper.ImGui_TextWrapped(ctx, 'EN: ' .. r.en)
-      reaper.ImGui_PopStyleColor(ctx)
-    end
-    local pushed = _push_font(ctx, 15)
-    local rv, txt = reaper.ImGui_InputTextMultiline(ctx, '##fittext',
-                                                    r.text or '', -1, 46)
-    if pushed then _pop_font(ctx) end
-    if rv then r.text = txt end
-    reaper.ImGui_PopID(ctx)
-  end
-
-  reaper.ImGui_Dummy(ctx, 0, 4)
-  local can = not busy and not V5.fit_queue
-  _ui_begin_disabled(ctx, not can)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),        V5.COL.job)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), V5.COL.job_hi)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(),  V5.COL.job_act)
-  if reaper.ImGui_Button(ctx, string.format('⟳  Voice all %d##fitvoice',
-                                            #F.rows), 200, 30) and can then
-    -- The group's span as it is NOW: first chunk's start, last chunk's end.
-    -- V5.fit_layout keeps both where they are.
-    local f_it = _find_item_by_guid(F.rows[1].guid)
-    local l_it = _find_item_by_guid(F.rows[#F.rows].guid)
-    if f_it and l_it then
-      F.anchor_s = reaper.GetMediaItemInfo_Value(f_it, 'D_POSITION')
-      F.anchor_e = reaper.GetMediaItemInfo_Value(l_it, 'D_POSITION')
-                   + reaper.GetMediaItemInfo_Value(l_it, 'D_LENGTH')
-    end
-    V5.fit_queue = {}
-    for _, r in ipairs(F.rows) do
-      if (r.text or ''):match('%S') then
-        table.insert(V5.fit_queue, { guid = r.guid, text = r.text })
-      end
-    end
-    if not V5.fit_voice_next() then V5.fit_queue, V5.fit_voicing = nil, nil end
-  end
-  reaper.ImGui_PopStyleColor(ctx, 3)
-  _ui_end_disabled(ctx)
-  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-    reaper.ImGui_SetTooltip(ctx, V5.wrap(
-      'Regenerate every chunk above with its own line, one after another, ' ..
-      'then lay them out like the English: the first chunk keeps its ' ..
-      'start, the last chunk keeps its end, the ones between start where ' ..
-      'their English starts (so the pauses match). A take that is too ' ..
-      'long for its room plays a little faster (pitch kept). The old ' ..
-      'takes stay on disk.'))
-  end
-  reaper.ImGui_SameLine(ctx)
-  if V5.chip(ctx, 'Discard##fitdrop', 'Forget these lines. Nothing on the ' ..
-             'timeline was changed.') and not V5.fit_queue then
-    V5.fit = nil
-  end
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(),
-                              all_fit and V5.COL.dimmer or V5.COL.warn)
-  reaper.ImGui_Text(ctx, string.format('~%d credits%s', credits,
-    all_fit and '' or ' · some lines run long — edit them first'))
-  reaper.ImGui_PopStyleColor(ctx)
 end
 
 local function ui_regen_section(ctx)
@@ -9490,11 +8591,6 @@ local function ui_regen_section(ctx)
 
   -- v0.18.6: speed + assistant for this chunk.
   V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, sel, guid)
-
-  -- v0.32: several chunks — or a "Voice all" still working through them.
-  if multi or V5.fit_queue then
-    V5.fit_ui(ctx, sel, prev_it, next_it, guid)
-  end
 
   V5.chunk_neighbour(ctx, next_it, '↓')
 
@@ -14388,15 +13484,22 @@ function V5.ui_source_inputs(ctx)
       'The engine transcribes the audio and runs the LLM translation ' ..
       'chain (Step 1 translate, Step 2 review, Step 3 punctuation prompts) ' ..
       'to produce the script.' },
-    -- v0.26.1: 'ai' ("AI · learns") hidden — AI · test rules replaces it.
+    { 'ai', 'AI · learns',
+      'Lekhak agents: memory of your approved lines, a translator that ' ..
+      'writes in the style it learned from your reviews, free checks ' ..
+      '(timing, numbers, script, glossary), one repair pass, a 3-critic ' ..
+      'panel on anything still failing, and a proofer that marks lines to ' ..
+      'look at (<audio>_ai_report.txt). When you approve a reviewed script ' ..
+      'it learns from your edits. Sync works exactly as in Prompt chain. ' ..
+      'Use "Pause to check" so it can learn.' },
     { 'ai_test', 'AI · test rules',
-      'Lekhak AI agents (translator, free checks, repair, 3 critics, ' ..
-      'proofer) plus the prompt-mode house rules (holistic mapping, ' ..
+      'A safe place to try new translation rules. Same AI team as ' ..
+      '"AI · learns" plus the prompt-mode house rules (holistic mapping, ' ..
       'pause and punctuation rules, the review checklist), which win over ' ..
-      'the learned style. It uses and teaches the AI memory (when you ' ..
-      'approve the script or press "Learn from final dub"), and saves ' ..
-      'everything to <audio>_TEST, so Prompt chain results for the same ' ..
-      'audio are never touched. Imported tracks are marked [TEST].' },
+      'the learned style. It USES what AI mode has learned but never ' ..
+      'teaches it anything, and saves everything to <audio>_TEST, so your ' ..
+      'normal AI and Prompt chain results for the same audio are never ' ..
+      'touched. Imported tracks are marked [TEST].' },
     { 'prompt_agents', 'Prompt agents · test',
       'Your hand-written Prompt-chain files as a team of three agents: ' ..
       'Translator (Step 1), Reviewer (Step 2) and Punctuator (Step 3) ' ..
@@ -14530,9 +13633,9 @@ function V5.ui_source_inputs(ctx)
       if SCRIPT_MODE == 'ai_test' then
         reaper.ImGui_Dummy(ctx, 0, 6)
         reaper.ImGui_TextWrapped(ctx,
-          'The prompt-mode house rules are ON and win over the learned ' ..
-          'style. This run learns into the AI memory; all files go to ' ..
-          '<audio>_TEST and tracks import as [TEST] beside your normal ' ..
+          'Test mode: the prompt-mode house rules are ON and win over the ' ..
+          'learned style. Nothing is learned from this run, and all files ' ..
+          'go to <audio>_TEST; tracks import as [TEST] beside your normal ' ..
           'dub for comparison.')
       end
       if SCRIPT_MODE == 'ai' then
@@ -16874,16 +15977,6 @@ local function main()
       -- it needs its own reason to be polled — and, like the run, it has to
       -- finish whichever screen the user walked off to.
       if _ui_phase == "running" or V5.quiet_job then poll_engine() end
-      -- v0.32 "Voice all": the next chunk starts a moment after the last one
-      -- finished, so the old launcher has exited (preflight refuses while it
-      -- is still shutting down).
-      if V5.fit_next_at and reaper.time_precise() >= V5.fit_next_at
-         and not V5.busy() then
-        V5.fit_next_at = nil
-        if not V5.fit_voice_next() then
-          V5.fit_queue, V5.fit_voicing = nil, nil
-        end
-      end
       -- v0.5: the embedded Auto Sync run polls every frame too — it is
       -- independent of the dub run and of which tab is showing.
       if V5.SYNC then V5.SYNC.poll() end

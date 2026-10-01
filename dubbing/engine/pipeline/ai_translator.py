@@ -905,14 +905,7 @@ def fit_to_seconds(english: str, current: str, seconds: float,
     meaning, in the learned house voice. Returns the new line, or "" when
     the model gave nothing usable (the caller keeps the original)."""
     prof = load_profile(language)
-    try:                              # v0.28: the measured speaking speed
-        from .sync_learn import learned_cps
-        # never above the old 11 chars/s guess: a shortened line keeps
-        # room to spare (v0.28.3, the measured speed made them too long)
-        cps = min(learned_cps(language) or 11.0, 11.0)
-    except Exception:                                    # noqa: BLE001
-        cps = 11.0
-    target_chars = max(8, int(seconds * cps))
+    target_chars = max(8, int(seconds * 11.0))
     prompt = (
         f"\n\nThis {language} dubbing line is too long to speak in "
         f"{seconds:.1f} seconds. Rewrite it so it fits (about "
@@ -983,91 +976,6 @@ def suggest_fits(english: str, current: str, speech_s: float, hard_s: float,
     out.sort(key=lambda t: (estimate_duration(t, language) > hard_s,
                             abs(estimate_duration(t, language) - speech_s)))
     return out[:n]
-
-
-def fit_chunks(rows, language: str, chars_per_sec: float = 0.0,
-               prev_line: str = "", next_line: str = "",
-               model: str = GEMINI_DEFAULT_MODEL,
-               house_rules: bool = False) -> dict:
-    """v0.32 Regenerate tab, "Write a line for each chunk": the reviewer has
-    placed several consecutive dub chunks on the timeline where the English
-    is spoken. Write ONE fresh line per chunk that says what the English
-    says inside that chunk's window, in the English order, sized to the
-    chunk's placed length. One call for the whole selection so the lines
-    read as one continuous speech.
-
-    rows: [{"k": int, "len": seconds, "en": str, "cur": str}] in timeline
-    order. *chars_per_sec* is the speaking rate measured on the timeline
-    (0 = the language default). Returns {k: text}; a chunk the model
-    skipped is simply absent (the panel keeps its current line)."""
-    from .config import DEFAULT_CHARS_PER_SEC, LANG_CHARS_PER_SEC
-    rows = [r for r in rows or [] if (r.get("en") or r.get("cur"))]
-    if not rows:
-        return {}
-    rate = chars_per_sec if chars_per_sec and chars_per_sec > 1 else \
-        LANG_CHARS_PER_SEC.get(language, DEFAULT_CHARS_PER_SEC)
-    no_en = "(no English under it: continue the thought of its neighbours)"
-    listing = "\n".join(
-        f"[{r['k']}] {r['len']:.1f} s, ~{max(4, int(r['len'] * rate))} chars"
-        f"\n  ENGLISH: \"{r.get('en') or no_en}\""
-        + (f"\n  CURRENT {language}: \"{r['cur']}\"" if r.get("cur") else "")
-        for r in rows)
-    prompt = (
-        f"\n\nThe reviewer selected {len(rows)} consecutive {language} dub "
-        "chunks. Each chunk's time is how long its ENGLISH takes in the "
-        "source audio (start to end of the English speech), so the "
-        f"{language} line must be spoken in that same time. "
-        "Write ONE new line per chunk:\n"
-        "- It says what the ENGLISH of that chunk says — nothing from a "
-        "neighbouring chunk, nothing left out (every name and number).\n"
-        "- It follows the English order of ideas and key words as closely "
-        f"as {language} grammar allows.\n"
-        "- It FILLS the chunk's time: about the given character count "
-        "(within about 10%). If a literal rendering is too short, use "
-        "fuller natural phrasing (a connecting word, the full form instead "
-        "of a pronoun) — never new meaning. If too long, compact the "
-        "wording — never drop meaning.\n"
-        "- [pause N s] in the English marks where the speaker pauses "
-        "inside the chunk: put a comma, or … for a pause of a second or "
-        "more, at the same point of the line. Never write the [pause] "
-        "tag itself.\n"
-        "- Read together, the lines are one natural continuous speech: a "
-        "sentence may run across chunks, so each line is the part of it "
-        "spoken in that window.\n"
-        "- CURRENT is only context; rewrite freely.\n"
-        "- No pause markers (|), no commentary.\n\n"
-        + (f"LINE BEFORE THE SELECTION: \"{prev_line}\"\n" if prev_line else "")
-        + "CHUNKS:\n" + listing + "\n"
-        + (f"LINE AFTER THE SELECTION: \"{next_line}\"\n" if next_line else "")
-        + f"\nReply with JSON only: {{\"lines\": [{{\"k\": <chunk number>, "
-        f"\"text\": \"<{language} line>\"}}]}}")
-    prof = load_profile(language)
-    try:
-        data = _parse_json_reply(_llm_generate(
-            prompt, model,
-            static_prefix=build_static_prefix(language, prof,
-                                              output_rules=False,
-                                              house_rules=house_rules),
-            role="translate", temperature=0.3))
-    except Exception:                                # noqa: BLE001
-        return {}
-    wanted = {int(r["k"]) for r in rows}
-    out = {}
-    lines = data.get("lines") if isinstance(data, dict) else data
-    for ln in lines if isinstance(lines, list) else []:
-        if not isinstance(ln, dict):
-            continue
-        try:
-            k = int(ln.get("k"))
-        except (TypeError, ValueError):
-            continue
-        text = str(ln.get("text") or "")
-        # Never voice a copied [pause N s] tag.
-        text = re.sub(r"\[\s*pause[^\]]*\]", " ", text, flags=re.I)
-        text = " ".join(split_pause_markers(text)[0].split())
-        if k in wanted and text and k not in out:
-            out[k] = text
-    return out
 
 
 def recommend_voices(language: str, voices, line: str = "", english: str = "",

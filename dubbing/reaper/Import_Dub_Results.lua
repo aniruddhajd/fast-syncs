@@ -397,7 +397,6 @@ local function fresh_name_suffix(tag)
     local suffix = (n == 1) and "" or (" " .. n)
     if not (existing[TRACK_EN .. tag .. suffix]
             or existing[TRACK_CHUNKS .. tag .. suffix]
-            or existing[TRACK_UNSYNC .. tag .. suffix]
             or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
@@ -455,13 +454,6 @@ end
 -- REAPER draws notes across the item and hid the waveform. The Dub panel's
 -- Regenerate tab reads back this same key.
 local ITEM_TEXT_KEY = "P_EXT:fastsyncs_chunk_text"
-
--- v0.28: the engine piece (timestamps index) of a dub clip; this importer
--- adds no region offset. Read back by the panel's "Learn from final dub".
-local function set_item_piece(item, index)
-  reaper.GetSetMediaItemInfo_String(item, "P_EXT:fastsyncs_piece",
-    string.format("%d|0.000", index or 0), true)
-end
 
 local function set_item_text(item, text)
   reaper.GetSetMediaItemInfo_String(item, ITEM_TEXT_KEY, text or "", true)
@@ -663,18 +655,12 @@ local function main()
 
     if #synced_entries > 0 then
       local tr = append_named_track(TRACK_CHUNKS .. suffix)
-      -- v0.28.9: the run this track came from (panel's Learn drop-down)
-      reaper.GetSetMediaTrackInfo_String(tr, "P_EXT:fastsyncs_run",
-                                         m.out_dir or "", true)
-      reaper.GetSetMediaTrackInfo_String(tr, "P_EXT:fastsyncs_lang",
-                                         m.language or "", true)
       for i, e in ipairs(synced_entries) do
         local it = add_file_item(tr, tts_wav, e.synced_start, e.dur,
                                  e.orig_start,
                                  string.format("chunk %02d", e.index or i))
         if it then
           chunks_added = chunks_added + 1
-          set_item_piece(it, e.index or i)
           local note = note_for(e, #synced_entries, i)
           if note ~= "" then
             set_item_text(it, note)
@@ -688,15 +674,13 @@ local function main()
     end
 
     if #unsync_entries > 0 then
-      -- v0.28.8: its own track, numbered like this import's Dub Chunks
-      local tr = append_named_track(TRACK_UNSYNC .. suffix)
+      local tr = find_or_append_track(TRACK_UNSYNC .. tag)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, e.synced_start, e.dur,
                                  e.orig_start,
                                  string.format("unsync %02d", e.index or i))
         if it then
           unsync_added = unsync_added + 1
-          set_item_piece(it, e.index or i)
           local note = note_for(e, #unsync_entries, i)
           if note ~= "" then
             set_item_text(it, note)

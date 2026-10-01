@@ -407,20 +407,6 @@ def _parse_args(argv):
                     action="store_true",
                     help="v0.19: recommend voices for one line (request in "
                          "--text-file). Forwarded to dub_engine.py.")
-    ap.add_argument("--clear-memory", dest="clear_memory",
-                    action="store_true",
-                    help="v0.28.6: clear AI memory for one audio or a whole "
-                         "language (request in --text-file). Forwarded to "
-                         "dub_engine.py.")
-    ap.add_argument("--tighten-pauses", dest="tighten_pauses",
-                    action="store_true",
-                    help="v0.28.2: shorten the long pauses inside dub clips "
-                         "(regen tab Speed up; request in --text-file). "
-                         "Forwarded to dub_engine.py.")
-    ap.add_argument("--fit-chunks", dest="fit_chunks", action="store_true",
-                    help="v0.32: one line per selected dub chunk, sized to "
-                         "its placed length (request in --text-file, "
-                         "UTF-8). Forwarded to dub_engine.py.")
     ap.add_argument("--learn-final", dest="learn_final",
                     action="store_true",
                     help="v0.21: AI mode learns from the final dub (the "
@@ -445,17 +431,10 @@ def _parse_args(argv):
 
     # Mirror dub_engine.py's mode validation here so a bad launch dies with
     # a clear argparse message instead of deep inside the detached child.
-    if args.clear_memory:
+    if args.review_assist or args.recommend_voice or args.learn_final:
         if not args.language or not args.text_file:
-            ap.error("--clear-memory requires --language and --text-file")
-    elif args.tighten_pauses:
-        if not args.text_file:
-            ap.error("--tighten-pauses requires --text-file")
-    elif args.review_assist or args.recommend_voice or args.learn_final \
-       or args.fit_chunks:
-        if not args.language or not args.text_file:
-            ap.error("--review-assist/--recommend-voice/--learn-final/"
-                     "--fit-chunks require --language and --text-file")
+            ap.error("--review-assist/--recommend-voice/--learn-final "
+                     "require --language and --text-file")
     elif args.suggest_fit:
         if args.test_llm or args.regen_chunk or args.list_voices \
            or args.voice_change:
@@ -579,15 +558,7 @@ def main(argv=None) -> int:
             log_file.write("[run_dub] note: --app-dir is deprecated (v0.3) "
                            "and ignored by the standalone engine.\n")
             cmd += ["--app-dir", args.app_dir]
-        if args.clear_memory:
-            cmd += ["--clear-memory", "--text-file", args.text_file]
-        elif args.tighten_pauses:
-            cmd += ["--tighten-pauses", "--text-file", args.text_file]
-        elif args.fit_chunks:
-            cmd += ["--fit-chunks", "--text-file", args.text_file]
-            if args.script_source == "ai_test":     # v0.24: house rules
-                cmd += ["--script-source", "ai_test"]
-        elif args.learn_final:
+        if args.learn_final:
             cmd += ["--learn-final", "--text-file", args.text_file]
         elif args.recommend_voice:
             cmd += ["--recommend-voice", "--text-file", args.text_file]

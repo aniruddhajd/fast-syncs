@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """v0.24 "AI · test rules" (--script-source ai_test) — offline, no network.
 
-The test source is AI mode plus house rules that never shares a folder
-with a normal run (v0.26: it learns into the shared AI memory):
+The test source is AI mode plus house rules that never learns and never
+shares a folder with a normal run:
   * argparse accepts ai_test with the same guards as ai
   * it counts as an AI source (anchor sync, phrase cues) and is flagged test
   * results go to <src>/<stem>_TEST/<stem>_TEST_*; a re-run from the copy
     reuses it; a NORMAL run from that copy goes to the ordinary <stem> folder
-  * v0.26: it learns (_learns); --learn-final accepts a _TEST run and
-    refuses only a Prompt-agents _PTEST run
+  * --learn-final refuses a _TEST run
 
     python -m unittest dubbing/engine/tests/test_test_mode.py -v
 """
@@ -91,88 +90,18 @@ class Folder(unittest.TestCase):
                                                        "talk")))
 
 
-class LanguageFolders(unittest.TestCase):
-    """v0.27: one output folder per language (and per test run)."""
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(dir=_TMP)
-        self.audio = os.path.join(self.dir, "talk.wav")
-        with open(self.audio, "wb") as f:
-            f.write(b"RIFF0000WAVE")
-
-    def test_each_language_gets_its_own_folder(self):
-        m = {}
-        out, base = de._prepare_out_dir(None, self.audio, m,
-                                        language="Marathi")
-        self.assertEqual(out, os.path.join(self.dir, "talk_Marathi"))
-        self.assertEqual(base, os.path.join(out, "talk_Marathi"))
-        self.assertNotIn("variant", m)                  # a normal run
-        hi, _ = de._prepare_out_dir(None, self.audio, {}, language="Hindi")
-        self.assertEqual(hi, os.path.join(self.dir, "talk_Hindi"))
-
-    def test_test_run_folder_has_language_and_suffix(self):
-        m = {}
-        out, base = de._prepare_out_dir(None, self.audio, m,
-                                        test=de.TEST_SUFFIX,
-                                        language="Marathi")
-        self.assertEqual(out, os.path.join(self.dir, "talk_Marathi_TEST"))
-        self.assertEqual(m["variant"], "test")
-        self.assertTrue(de._is_test_base(base))
-
-    def test_copy_inside_a_run_folder_goes_beside_it(self):
-        mr, _ = de._prepare_out_dir(None, self.audio, {}, language="Marathi")
-        inner = os.path.join(mr, "talk.wav")
-        again, _ = de._prepare_out_dir(None, inner, {}, language="Marathi")
-        self.assertEqual(again, mr)                     # reused
-        hi, _ = de._prepare_out_dir(None, inner, {}, language="Hindi")
-        self.assertEqual(hi, os.path.join(self.dir, "talk_Hindi"))
-        # a pre-v0.27 <stem> folder copy also goes beside, never inside
-        old = os.path.join(self.dir, "talk")
-        os.makedirs(old, exist_ok=True)
-        ta, _ = de._prepare_out_dir(None, os.path.join(old, "talk.wav"), {},
-                                    language="Tamil")
-        self.assertEqual(ta, os.path.join(self.dir, "talk_Tamil"))
-
-    def test_unrelated_parent_folder_is_not_mistaken(self):
-        rec = os.path.join(self.dir, "talk_recordings")
-        os.makedirs(rec, exist_ok=True)
-        out, _ = de._prepare_out_dir(None, os.path.join(rec, "talk.wav"), {},
-                                     language="Marathi")
-        self.assertEqual(out, os.path.join(rec, "talk_Marathi"))
-
-
-def _learn_req(folder):
-    d = tempfile.mkdtemp(dir=_TMP)
-    os.makedirs(os.path.join(d, folder), exist_ok=True)
-    base = os.path.join(d, folder, folder)
-    req = os.path.join(d, "req.txt")
-    with open(req, "w", encoding="utf-8") as f:
-        f.write(f"BASE: {base}\nC: 0.0|2.0|नमस्कार\n")
-    return types.SimpleNamespace(text_file=req, language="Marathi"), base
-
-
-class Learning(unittest.TestCase):
-    def test_test_rules_learns_prompt_agents_does_not(self):
-        self.assertTrue(de._learns(_args("ai")))
-        self.assertTrue(de._learns(_args("ai_test")))
-        self.assertFalse(de._learns(_args("prompt_agents")))
-        self.assertFalse(de._learns(_args("prompt")))
-
-    def test_learn_final_accepts_test_run(self):
-        args, base = _learn_req("a_TEST")
-        self.assertFalse(de._is_ptest_base(base))
-        sentinel = RuntimeError("reached learning")
-        with mock.patch.object(de, "_import_pipeline", side_effect=sentinel):
-            with self.assertRaises(RuntimeError) as cm:
-                de._run_learn_final(args, {})
-        self.assertIs(cm.exception, sentinel)   # past the gate
-
-    def test_learn_final_refuses_prompt_agents_run(self):
-        args, base = _learn_req("a_PTEST")
-        self.assertTrue(de._is_ptest_base(base))
+class NoLearning(unittest.TestCase):
+    def test_learn_final_refuses_test_run(self):
+        d = tempfile.mkdtemp(dir=_TMP)
+        os.makedirs(os.path.join(d, "a_TEST"), exist_ok=True)
+        base = os.path.join(d, "a_TEST", "a_TEST")
+        req = os.path.join(d, "req.txt")
+        with open(req, "w", encoding="utf-8") as f:
+            f.write(f"BASE: {base}\nC: 0.0|2.0|नमस्कार\n")
+        args = types.SimpleNamespace(text_file=req, language="Marathi")
         with self.assertRaises(RuntimeError) as cm:
             de._run_learn_final(args, {})
-        self.assertIn("Prompt agents", str(cm.exception))
+        self.assertIn("test rules", str(cm.exception))
 
 
 if __name__ == "__main__":

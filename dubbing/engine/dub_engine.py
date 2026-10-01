@@ -250,7 +250,6 @@ REQUIRED_FUNCTIONS = [
     "proof_pages",                   # advisory sentence-level proofer
     "fit_to_seconds",                # anchor sync: targeted line-fit retry
     "suggest_fits",                  # review screen: shorter options for overflows
-    "fit_chunks",                    # regen tab: one line per placed chunk
     "review_assist",                 # review screen: instruction-following assistant
     "recommend_voices",              # regen tab: AI voice recommendations
     "sync_check",                    # v0.18 sync check agent: verify + tighten offsets
@@ -273,10 +272,6 @@ REQUIRED_FUNCTIONS = [
     "download_dubbed_audio", "speaker_voices",
     # v0.25 Prompt agents (--script-source prompt_agents)
     "prompt_agents_translate",
-    # v0.28 sync feedback loops (pipeline/sync_learn.py)
-    "learned_bias", "bias_windows", "merge_bias", "merge_cps",
-    "load_sync_profile", "save_sync_profile", "loop_score", "loop_offenders",
-    "loop_better",
 ]
 REQUIRED_ATTRIBUTES = [
     "GEMINI_DEFAULT_MODEL",
@@ -312,18 +307,12 @@ PLAN_MANIFEST_KEYS = ["status", "error", "audio", "language", "out_dir",
 TEST_LLM_MANIFEST_KEYS = ["status", "error", "provider", "model", "reply"]
 # v0.18 --suggest-fit: fit suggestions for the review screen
 SUGGEST_MANIFEST_KEYS = ["status", "error", "suggest_txt", "suggest_count"]
-# v0.32 --fit-chunks (regen tab: one line per placed chunk)
-FITCH_MANIFEST_KEYS = ["status", "error", "fit_txt", "fit_count"]
-# v0.28.2 --tighten-pauses (regen tab Speed up): the shortened takes
-PAUSE_MANIFEST_KEYS = ["status", "error", "pause_txt", "pause_count"]
 # v0.18.6 --review-assist: the review screen assistant
 ASSIST_MANIFEST_KEYS = ["status", "error", "assist_txt"]
 # v0.19 --recommend-voice: voice recommendations for the regen tab
 RECO_MANIFEST_KEYS = ["status", "error", "reco_txt"]
 # v0.21 --learn-final: learn from the final dub (Regenerate tab button)
 LEARNF_MANIFEST_KEYS = ["status", "error", "learn_txt"]
-# v0.28.6 --clear-memory (Regenerate tab "Forget this audio" / "Clear all")
-CLEARMEM_MANIFEST_KEYS = ["status", "error", "clear_txt"]
 VOICES_MANIFEST_KEYS = ["status", "error", "voices"]
 VOICE_CHANGE_MANIFEST_KEYS = ["status", "error", "vc_wav"]
 
@@ -449,31 +438,6 @@ def _parse_args():
                          "for shorter renderings of each, and write them to "
                          "<text-file>.out ('@@ <index>' then one option per "
                          "line). No audio, no TTS.")
-    ap.add_argument("--fit-chunks", dest="fit_chunks", action="store_true",
-                    help="v0.32 regen tab: write one fresh line per selected "
-                         "dub chunk, sized to its placed length. --text-file "
-                         "(UTF-8): optional CPS:/PREV:/NEXT: lines, then "
-                         "'@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per "
-                         "chunk; writes <text-file>.out ('@@ <k>' then the "
-                         "line). Text-only LLM call, no audio, no TTS.")
-    ap.add_argument("--clear-memory", dest="clear_memory",
-                    action="store_true",
-                    help="v0.28.6: clear AI memory. --text-file (UTF-8): "
-                         "'SCOPE: audio' + 'BASE: <run base>' forgets the "
-                         "saved script and clip positions of that audio; "
-                         "'SCOPE: language' wipes everything learned for "
-                         "--language (backed up first). Writes "
-                         "<text-file>.out (CLEARED:/BACKUP: lines). Local "
-                         "files only — no API calls.")
-    ap.add_argument("--tighten-pauses", dest="tighten_pauses",
-                    action="store_true",
-                    help="v0.28.2 regen tab Speed up: shorten the long "
-                         "silences inside dub clips (words untouched). "
-                         "--text-file (UTF-8): 'OUT: <dir>' and one "
-                         "'T: <key>|<offset_s>|<length_s>|<source wav>' "
-                         "line per clip; writes <text-file>.out "
-                         "('T: <key>|<new length_s>|<cut ms>|<new wav>'). "
-                         "Local audio only — no API calls, no credits.")
     ap.add_argument("--recommend-voice", dest="recommend_voice",
                     action="store_true",
                     help="v0.19: recommend voices from the account catalogue "
@@ -514,19 +478,10 @@ def _parse_args():
 
     if args.selfcheck:
         return args
-    if args.tighten_pauses:
-        if not args.text_file:
-            ap.error("--tighten-pauses requires --text-file")
-        return args
-    if args.clear_memory:
+    if args.review_assist or args.recommend_voice or args.learn_final:
         if not args.language or not args.text_file:
-            ap.error("--clear-memory requires --language and --text-file")
-        return args
-    if args.review_assist or args.recommend_voice or args.learn_final \
-       or args.fit_chunks:
-        if not args.language or not args.text_file:
-            ap.error("--review-assist/--recommend-voice/--learn-final/"
-                     "--fit-chunks require --language and --text-file")
+            ap.error("--review-assist/--recommend-voice/--learn-final "
+                     "require --language and --text-file")
         return args
     if args.suggest_fit:
         if args.test_llm or args.regen_chunk or args.list_voices \
@@ -615,10 +570,8 @@ def _parse_args():
 
 
 # v0.24 "AI · test rules": AI mode + the distilled prompt-mode house rules,
-# into its own <audio>_TEST folder. Every AI-mode behaviour (phrase cues,
-# anchor sync, no prompt files) applies to it. v0.26: it LEARNS into the same
-# shared AI memory + style profile as "AI · learns" (at review or from the
-# final dub, per ai_learn_at). Only Prompt agents (_PTEST) never learns.
+# run read-only (never learns) into its own <audio>_TEST folder. Every AI-mode
+# behaviour (phrase cues, anchor sync, no prompt files) applies to it.
 TEST_SUFFIX = "_TEST"
 
 
@@ -639,16 +592,9 @@ def _is_pagents(args) -> bool:
 
 
 def _is_test(args) -> bool:
-    """Test sources: own folder, [TEST]/[PTEST] tracks. (v0.26: only
-    Prompt agents never learns — see _learns.)"""
+    """Test sources: never learn, own folder, [TEST]/[PTEST] tracks."""
     return getattr(args, "script_source", "prompt") in ("ai_test",
                                                         "prompt_agents")
-
-
-def _learns(args) -> bool:
-    """v0.26: AI · learns and AI · test rules teach the shared AI memory;
-    Prompt agents (a pure prompt test) never does."""
-    return bool(_ai_source(args)) and not _is_pagents(args)
 
 
 def _house_rules_on(args) -> bool:
@@ -665,19 +611,6 @@ def _test_suffix(args):
 def _draft_mode(args) -> str:
     return "ptest" if _is_pagents(args) else ("test" if _is_test(args)
                                               else "ai")
-
-
-def _is_ptest_base(base: str) -> bool:
-    """v0.26: a Prompt-agents run (never learns): an <x>_PTEST folder or a
-    draft whose mode is "ptest". _TEST runs (AI · test rules) may learn."""
-    folder = os.path.basename(os.path.dirname(base or ""))
-    if folder.endswith(PTEST_SUFFIX):
-        return True
-    try:
-        with open((base or "") + "_ai_draft.json", "r", encoding="utf-8") as f:
-            return json.load(f).get("mode") == "ptest"
-    except Exception:
-        return False
 
 
 def _is_test_base(base: str) -> bool:
@@ -853,13 +786,12 @@ def _import_pipeline():
                           pausechunk, preview_html, ai_translator,
                           ai_lang, ai_checks, ai_memory, ai_agents,
                           sync_check, anchor_align, spectral_vad,
-                          el_dubbing, prompt_agents, sync_learn)
+                          el_dubbing, prompt_agents)
     ns = types.SimpleNamespace()
     for mod in (config, stt, srt_tools, llm, tts, sync, match, agent_splitter,
                 agent_aligner, pausechunk, preview_html, ai_lang, ai_checks,
                 ai_memory, ai_agents, ai_translator, sync_check,
-                anchor_align, spectral_vad, el_dubbing, prompt_agents,
-                sync_learn):
+                anchor_align, spectral_vad, el_dubbing, prompt_agents):
         for name, value in vars(mod).items():
             if name.startswith("__"):
                 continue
@@ -1031,55 +963,43 @@ def _load_pipeline_and_keys(args, need_llm=True):
     return pl, api_key
 
 
-def _lang_suffix(language) -> str:
-    """v0.27: "_Marathi" — every run of an audio gets one folder PER
-    LANGUAGE, so dubbing the same talk into Hindi never touches Marathi."""
-    lang = re.sub(r"[^0-9A-Za-z]+", "_", str(language or "")).strip("_")
-    return "_" + lang if lang else ""
-
-
-def _run_folder_names(stem):
-    """Every folder name one of our runs of <stem> can live in: the pre-v0.27
-    <stem>, <stem>_TEST, <stem>_PTEST, and the v0.27 <stem>_<Language>
-    (+ _TEST / _PTEST). A copy of the audio inside any of them belongs to
-    the folder's PARENT — a new run never nests inside an old one."""
-    names = {stem, stem + TEST_SUFFIX, stem + PTEST_SUFFIX}
-    for lang in LANGUAGES:
-        s = stem + _lang_suffix(lang)
-        names.update((s, s + TEST_SUFFIX, s + PTEST_SUFFIX))
-    return names
-
-
-def _prepare_out_dir(pl, audio_path, manifest, test=False, language=None):
+def _prepare_out_dir(pl, audio_path, manifest, test=False):
     """Create/reuse the app-convention output folder next to the audio.
 
     Done BEFORE any paid API work (cheap mkdir+copy): an unwritable input
     location (mounted DMG, read-only share) must fail fast, not after the
     S1a transcription spend. Setting manifest["out_dir"] up front also
     means even early failures write the manifest copy next to the audio.
-    v0.27: <src>/<stem>_<Language>/ (test runs <stem>_<Language>_TEST/),
-    every file named <stem>_<Language>_*. Returns (out_dir, base).
+    Returns (out_dir, base).
     """
-    suffix = test if isinstance(test, str) else (TEST_SUFFIX if test else "")
-    return _prepare_test_dir(audio_path, manifest, suffix,
-                             _lang_suffix(language))
+    if test:
+        return _prepare_test_dir(audio_path, manifest,
+                                 test if isinstance(test, str)
+                                 else TEST_SUFFIX)
+    out_dir = pl._prepare_output_dir(audio_path)
+    if not os.access(out_dir, os.W_OK):
+        raise RuntimeError(f"Output folder is not writable: {out_dir} — "
+                           "move the audio to a writable location.")
+    base = os.path.join(
+        out_dir, os.path.splitext(os.path.basename(audio_path))[0])
+    manifest["out_dir"] = out_dir
+    copied_audio = os.path.join(out_dir, os.path.basename(audio_path))
+    manifest["en_audio"] = copied_audio if os.path.exists(copied_audio) else ""
+    return out_dir, base
 
 
-def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX, lang=""):
-    """<src>/<stem><lang><suffix>/ with every file named <stem><lang><suffix>_*,
-    exactly as if the audio were called that — so every rule that says "the
-    folder name is the base name" (the panel's cast file, Regenerate's
-    English lookup, the importers) works unchanged. v0.24 used it for the
-    _TEST / _PTEST test folders; v0.27 adds the language (<stem>_Marathi),
-    so each language — and each test run — keeps its own files."""
+def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX):
+    """v0.24 "AI · test rules": <src>/<stem>_TEST/ with every file named
+    <stem>_TEST_*, exactly as if the audio were called <stem>_TEST — so every
+    rule that says "the folder name is the base name" (the panel's cast file,
+    Regenerate's English lookup, the importers) works unchanged, and a test
+    run never overwrites the AI-mode or prompt-mode files of the same audio."""
     src_dir = os.path.dirname(os.path.abspath(audio_path))
     stem = os.path.splitext(os.path.basename(audio_path))[0]
-    tname = stem + lang + suffix
+    tname = stem + suffix
     if os.path.basename(src_dir) == tname:          # the copy inside it
         out_dir = src_dir
-    elif os.path.basename(src_dir) in _run_folder_names(stem):
-        # the copy inside another run's folder (another language, a test
-        # run, a pre-v0.27 <stem> folder): go beside it, never inside
+    elif os.path.basename(src_dir) == stem:          # the normal-run copy
         out_dir = os.path.join(os.path.dirname(src_dir), tname)
     else:
         out_dir = os.path.join(src_dir, tname)
@@ -1097,8 +1017,7 @@ def _prepare_test_dir(audio_path, manifest, suffix=TEST_SUFFIX, lang=""):
         pass
     manifest["out_dir"] = out_dir
     manifest["en_audio"] = copied if os.path.exists(copied) else ""
-    if suffix:
-        manifest["variant"] = "ptest" if suffix == PTEST_SUFFIX else "test"
+    manifest["variant"] = "ptest" if suffix == PTEST_SUFFIX else "test"
     return out_dir, os.path.join(out_dir, tname)
 
 
@@ -1129,8 +1048,7 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
               "will be skipped.")
 
     out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
-                                     test=_test_suffix(args),
-                                     language=args.language)
+                                     test=_test_suffix(args))
     ctx["out_dir"], ctx["base"] = out_dir, base
     if _is_pagents(args):
         _note(f"Test mode (Prompt agents): Lekhak bypassed — the Step1-3 "
@@ -1138,9 +1056,8 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
               f"nothing is learned; results go to "
               f"{os.path.basename(out_dir)}.")
     elif _is_test(args):
-        _note(f"Test mode (AI · test rules): house rules ON, learns into "
-              f"the shared AI memory; results go to "
-              f"{os.path.basename(out_dir)}.")
+        _note(f"Test mode (AI · test rules): house rules ON, nothing is "
+              f"learned; results go to {os.path.basename(out_dir)}.")
 
     # ── [S1a] Transcribe the English audio ─────────────────────────────────
     _say("S1a", "Transcribing English audio (ElevenLabs Scribe)…")
@@ -1225,11 +1142,6 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
         try:
             en_entries_tm = pl._extract_srt_entries(final_srt)
             tm_cached = _tm_full(language, en_entries_tm)
-            if tm_cached and _repeated_sentences(tm_cached):
-                _note("Translation memory: the stored script for this audio "
-                      "repeats a sentence back to back (learned from split "
-                      "clips) — not reused; translating afresh.")
-                tm_cached = None
             if not tm_cached and callable(_tm_block):
                 tm_glossary = _tm_block(language, en_entries_tm) or ""
         except Exception as e:
@@ -1274,19 +1186,11 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
             # v0.18: a memory hit still gets timed rows, so anchor sync (and
             # 1:1 review pairing) work on a re-run of an already-learned
             # script instead of falling back to the prompt sync.
-            m_rows = _final_window_rows(pl, language, ai_srt, tm_cached)
+            m_rows, m_exact = _memory_rows(pl, language, ai_srt, tm_cached)
             if m_rows:
-                _note("AI mode: memory paragraphs placed where you left them "
-                      "on the final timeline (Learn from final dub).")
-            else:
-                m_rows, m_exact = _memory_rows(pl, language, ai_srt,
-                                               tm_cached)
-                if m_rows:
-                    _note("AI mode: memory paragraphs paired "
-                          + ("by their original English (exact)." if m_exact
-                             else "by length, snapped to English sentence "
-                                  "ends."))
-            if m_rows:
+                _note("AI mode: memory paragraphs paired "
+                      + ("by their original English (exact)." if m_exact else
+                         "by length, snapped to English sentence ends."))
                 ctx["ai_rows"] = m_rows
                 prs = m_rows
                 punc_result = tr_result = rev_result = "\n\n".join(
@@ -1679,10 +1583,7 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
     # ── [S3d] placement + order sweep + files ───────────────────────────────
     _say("S3d", "Placing pieces into their English slots…")
     durations = [(e - s) / 1000.0 for (s, e) in spans]
-    en_wins = None
     if grain != "section":
-        en_wins = [p.get("win") for p in pieces]
-        pieces = _apply_learned_bias(pl, args, pieces)
         placed = pl.agentic_place_pieces(pieces, durations, en_entries, language,
                                          pl.GEMINI_DEFAULT_MODEL, api_key=api_key,
                                          voice_id=voice_id, el_model=args.el_model,
@@ -1713,8 +1614,6 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
         " ".join((t or "").split()) or EMPTY_PARAGRAPH_PLACEHOLDER
         for t in texts) + "\n")
     manifest["sync_texts"] = texts_path
-    if en_wins is not None and len(en_wins) == len(placed):
-        _write_sync_pieces(base, en_wins, texts, durations, placed)
 
     synced_entries = [e for e in entries if e["sync_status"] == "synced"]
     unsynced_n = len(entries) - len(synced_entries)
@@ -1753,194 +1652,6 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
         status_cb=lambda m: _say("S3e", m), extend_last=False)
     manifest["synced_wav"] = synced_path
     _say("S3e", f"Synced audio saved: {os.path.basename(synced_path)}")
-
-
-def _run_clear_memory(args, manifest):
-    """--clear-memory (v0.28.6).
-      audio:    forget the saved full script of ONE audio (the next run
-                translates it afresh) + its saved clip positions + the run's
-                learned markers (so Learn works again on it). Line pairs,
-                style and timing learned from it stay.
-      language: wipe everything AI mode learned for the language — style
-                profile, translation memory (pairs + scripts), timing and
-                speaking speed, clip positions — after copying it all to
-                <data>/ai_learning/backup-<time>/.
-    No API calls."""
-    import shutil
-    manifest["clear_txt"] = ""
-    in_path = os.path.abspath(os.path.expanduser(args.text_file))
-    if not os.path.isfile(in_path):
-        raise RuntimeError(f"--text-file not found: {in_path}")
-    scope, base = "", ""
-    for line in _read_text(in_path).lstrip("\ufeff").splitlines():
-        line = line.strip()
-        if line.startswith("SCOPE:"):
-            scope = line[6:].strip().lower()
-        elif line.startswith("BASE:"):
-            base = line[5:].strip()
-    if scope not in ("audio", "language", "script", "sync"):
-        raise RuntimeError("The clear request names no scope.")
-    pl = _import_pipeline()
-    tm = pl.translation_memory
-    if tm is None:
-        raise RuntimeError("The translation memory is not available.")
-    lang = pl._tm_lang(args.language)
-    conn = tm._get_conn()
-    out = []
-
-    def drop_markers(b):
-        for suf in (LEARN_FINAL_SUFFIX, SYNC_LEARNED_SUFFIX,
-                    "_ai_learned.json"):
-            try:
-                if b and os.path.isfile(b + suf):
-                    os.remove(b + suf)
-            except Exception:
-                pass
-
-    if scope == "audio":
-        en_entries, _en_name = _load_final_english(pl, base)
-        src = pl._tm_source_text(en_entries) if en_entries else ""
-        if not src:
-            raise RuntimeError("No English transcript found for this run — "
-                               "nothing to match its memory by.")
-        h = tm.source_hash(src)
-        docs = [r[0] for r in conn.execute(
-            "SELECT doc_text FROM full_docs WHERE language = ? AND "
-            "en_hash = ?", (lang, h))]
-        conn.execute("DELETE FROM full_docs WHERE language = ? AND "
-                     "en_hash = ?", (lang, h))
-        conn.commit()
-        n_pos = 0
-        for d in docs:
-            p = _final_windows_path(pl, args.language, d)
-            if os.path.isfile(p):
-                os.remove(p)
-                n_pos += 1
-        drop_markers(base)
-        out.append(f"CLEARED: {len(docs)} saved script(s) and {n_pos} set(s) "
-                   "of clip positions for this audio — the next run "
-                   "translates it fresh")
-        _note(out[-1].replace("CLEARED: ", "Memory: "))
-    else:
-        # v0.29: "script" = style, word choices, corrections, translation
-        # memory, saved scripts and their clip positions; "sync" = start
-        # timing and speaking speed; "language" = both.
-        do_script = scope in ("language", "script")
-        do_sync = scope in ("language", "sync")
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        bdir = os.path.join(pl.AI_LEARNING_DIR, f"backup-{stamp}")
-        os.makedirs(bdir, exist_ok=True)
-        key = pl._lang_key(args.language)
-        prof_file = pl.profile_path(args.language)
-        sync_file = pl.sync_profile_path(args.language)
-        fw = os.path.join(pl.AI_LEARNING_DIR, "final_windows", key)
-        what = []
-        if do_script:
-            if os.path.isfile(prof_file):
-                shutil.copy2(prof_file, os.path.join(bdir, key + ".json"))
-            if os.path.isdir(fw):
-                shutil.copytree(fw, os.path.join(bdir, "final_windows_" + key))
-            shutil.copy2(tm.DB_PATH, os.path.join(bdir,
-                                                  "translation_memory.db"))
-            n_pairs = conn.execute("SELECT COUNT(*) FROM pairs WHERE "
-                                   "language = ?", (lang,)).fetchone()[0]
-            n_docs = conn.execute("SELECT COUNT(*) FROM full_docs WHERE "
-                                  "language = ?", (lang,)).fetchone()[0]
-            conn.execute("DELETE FROM pairs WHERE language = ?", (lang,))
-            conn.execute("DELETE FROM full_docs WHERE language = ?", (lang,))
-            conn.commit()
-            if os.path.isfile(prof_file):
-                os.remove(prof_file)
-            if os.path.isdir(fw):
-                shutil.rmtree(fw, ignore_errors=True)
-            what.append(f"{n_pairs} line pair(s), {n_docs} saved script(s) "
-                        "and the learned style")
-        if do_sync:
-            if os.path.isfile(sync_file):
-                shutil.copy2(sync_file, os.path.join(bdir,
-                                                     "sync_" + key + ".json"))
-                os.remove(sync_file)
-            what.append("the learned timing and speaking speed")
-        if do_script:
-            drop_markers(base)
-        elif base and os.path.isfile(base + SYNC_LEARNED_SUFFIX):
-            os.remove(base + SYNC_LEARNED_SUFFIX)
-        label = {"language": "all", "script": "the script",
-                 "sync": "the timing"}[scope]
-        out.append(f"CLEARED: {label} {args.language} memory — "
-                   + " and ".join(what))
-        out.append(f"BACKUP: {bdir}")
-        _note(f"Memory: {label} {args.language} memory cleared; backup in "
-              f"{bdir}")
-    out_path = in_path + ".out"
-    _write_text(out_path, "\n".join(out) + "\n")
-    manifest["clear_txt"] = out_path
-
-
-def _final_windows_path(pl, language, doc):
-    """v0.28.5: where the clip positions of a learned final dub live, keyed
-    by the script's letters (so whitespace or line breaks never miss)."""
-    import hashlib
-    key = "".join(ch for ch in (doc or "").lower() if ch.isalnum())
-    return os.path.join(pl.AI_LEARNING_DIR, "final_windows",
-                        pl._lang_key(language),
-                        hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
-                        + ".json")
-
-
-def _save_final_windows(pl, language, final_text, chunks, request_text):
-    """v0.28.5 Learn from final dub: remember WHERE each clip of the final
-    timeline sits (in the English audio's own time — the region offset the
-    importer added is taken back out), so a re-run that reuses this script
-    from memory places every paragraph where the user left it instead of
-    guessing its English by length. Fail-open."""
-    try:
-        offs = [p[3] for p in _parse_learn_pieces(request_text)]
-        off = max(set(offs), key=offs.count) if offs else 0.0
-        rows = [{"s": round(s - off, 3), "e": round(s - off + n, 3), "t": t}
-                for (s, n, t) in chunks]
-        path = _final_windows_path(pl, language, final_text)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        _write_text(path, json.dumps(rows, ensure_ascii=False, indent=2))
-        _note(f"AI learning: the positions of {len(rows)} clip(s) were saved "
-              "— a re-run of this audio places its lines there.")
-    except Exception as e:                               # noqa: BLE001
-        _note(f"WARNING: clip positions not saved ({e}).")
-
-
-def _final_window_rows(pl, language, final_srt, doc):
-    """v0.28.5: timed rows for a script reused from a learned FINAL dub —
-    each paragraph at its clip's saved position, with the English cues
-    under it (so anchor sync gets exact windows). None when there are no
-    saved positions or they no longer match the script paragraph for
-    paragraph (then _memory_rows pairs as before)."""
-    try:
-        path = _final_windows_path(pl, language, doc)
-        if not os.path.isfile(path):
-            return None
-        wins = json.loads(_read_text(path)) or []
-        paras = pl._split_translation_paragraphs(doc)
-        if not wins or len(wins) != len(paras):
-            return None
-
-        def nk(s):
-            return "".join(ch for ch in (s or "").lower() if ch.isalnum())
-        if any(nk(w.get("t")) != nk(p) for w, p in zip(wins, paras)):
-            return None
-        en = pl._extract_srt_entries(final_srt) if final_srt else []
-        rows = []
-        for w, p in zip(wins, paras):
-            s0, s1 = float(w["s"]), float(w["e"])
-            cues = [k + 1 for k, (a, b, _t) in enumerate(en)
-                    if s0 - 0.3 <= (a + b) / 2.0 <= s1 + 0.3]
-            row = {"en": " ".join(en[k - 1][2] for k in cues), "tr": p,
-                   "start": s0, "end": max(s0, s1)}
-            if cues:
-                row["cues"] = cues
-            rows.append(row)
-        return rows
-    except Exception:                                    # noqa: BLE001
-        return None
 
 
 def _memory_rows(pl, language, final_srt, doc):
@@ -2265,11 +1976,6 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
     _say("S3c", "No EN <-> script mapping prompt: phrase alignment by "
                 "duration, guided by the translator's paragraph windows.")
 
-    # v0.28: the learned start bias (from "Learn from final dub") shifts
-    # every target; the ENGLISH windows are kept for _sync_pieces.json.
-    en_wins = [p["win"] for p in pieces]
-    pieces = _apply_learned_bias(pl, args, pieces)
-
     # ── [S3d] fit: stretch -> targeted retry -> stretch, then place ─────────
     _say("S3d", "Fitting pieces to their slots…")
     wins = [p["win"] for p in pieces]
@@ -2283,7 +1989,6 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
             nxt = min(audio_end, b + 2.0) if audio_end > b else b + 1.0
         return max(0.3, max(b, nxt) - a)
 
-    speed_paras = set()
     if not pl.PYDUB_AVAILABLE:
         _say("S3d", "WARNING: pydub unavailable — pieces are placed at their "
                     "synthesized length (no stretch, no fit retry).")
@@ -2295,326 +2000,89 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
         # v0.18.6: the reviewer's per-paragraph speed (review assistant /
         # speed buttons) is applied first, so fitting sees the real length.
         speeds = _row_speeds(base)
-        speed_paras = set(speeds or ())
         if speeds:
             n_sp = 0
-            cut_ms = 0
             for i, p in enumerate(pieces):
                 f = speeds.get(p.get("para"))
                 if f:
-                    # v0.28.2: a faster line also loses its long pauses
-                    # (same words, shorter silences), then is sped up
-                    if f > 1.0:
-                        segs[i], c = _tighten_segment(segs[i])
-                        cut_ms += c
                     segs[i] = _stretch_segment(pl, segs[i], f, out_dir,
                                                1000 + i)
                     n_sp += 1
-            if cut_ms:
-                _say("S3d", f"Speed up: {cut_ms / 1000.0:.1f} s of long "
-                            "pauses shortened in the faster lines.")
             _say("S3d", f"Reviewer speed applied to {n_sp} piece(s) in "
                         f"{len(speeds)} paragraph(s).")
         changes = []
-        fit_used = [0]
-
-        def _fit_retry(todo, budget_of):
-            """The translator agent's targeted retry: shorten pieces *todo*
-            to budget_of(i) seconds and re-voice them in ONE TTS call.
-            texts/segs change in place; returns the indices changed. All
-            calls together stay within ai_fit_retry_max."""
-            todo = list(todo)[:max(0, retry_cap - fit_used[0])]
-            if not todo:
-                return []
-            fit_used[0] += len(todo)
-            new_texts, idxs, done = [], [], []
+        over = [i for i, sg in enumerate(segs)
+                if len(sg) / 1000.0 > _slot(i) * max_atempo + 0.25]
+        if over and retry_on and retry_cap > 0:
+            todo = over[:retry_cap]
+            _say("S3d", f"{len(over)} piece(s) too long even at "
+                        f"{max_atempo:.2f}x — asking the translator agent to "
+                        f"fit {len(todo)} of them…")
+            new_texts, idxs = [], []
             for i in todo:
-                shorter = pl.fit_to_seconds(pieces[i]["en"], texts[i],
-                                            budget_of(i), language,
+                budget = _slot(i) * max_atempo * 0.95
+                en = pieces[i]["en"]
+                shorter = pl.fit_to_seconds(en, texts[i], budget, language,
                                             pl.GEMINI_DEFAULT_MODEL,
                                             house_rules=_house_rules_on(args))
                 if shorter:
                     idxs.append(i)
                     new_texts.append(shorter)
-            if not idxs:
-                return done
-            retry_path = os.path.join(out_dir, "_fit", "retry_tts.wav")
-            os.makedirs(os.path.dirname(retry_path), exist_ok=True)
-            r_voices = ([p_voices[i] for i in idxs] if p_voices else None)
-            try:
-                retry_path, r_spans = pl.synthesize_sentences_elevenlabs(
-                    new_texts, retry_path, api_key=api_key,
-                    voice_id=voice_id, model_id=args.el_model,
-                    voices=r_voices, status_cb=lambda m: _say("S3d", m))
-                if len(r_spans) == len(idxs):
-                    r_audio = pl._AudioSegment.from_file(retry_path)
-                    for i, t, (s0, e0) in zip(idxs, new_texts, r_spans):
-                        changes.append((i, texts[i], t))
-                        texts[i] = t
-                        segs[i] = r_audio[int(s0):int(e0)]
-                        done.append(i)
-                else:
-                    _say("S3d", "WARNING: re-voicing returned the wrong "
-                                "number of lines — keeping the originals.")
-            except Exception as e:                       # noqa: BLE001
-                _say("S3d", f"WARNING: fit retry synthesis failed ({e}) — "
-                            "keeping the original lines.")
-            return done
+            if idxs:
+                retry_path = os.path.join(out_dir, "_fit", "retry_tts.wav")
+                os.makedirs(os.path.dirname(retry_path), exist_ok=True)
+                r_voices = ([p_voices[i] for i in idxs] if p_voices else None)
+                try:
+                    retry_path, r_spans = pl.synthesize_sentences_elevenlabs(
+                        new_texts, retry_path, api_key=api_key,
+                        voice_id=voice_id, model_id=args.el_model,
+                        voices=r_voices, status_cb=lambda m: _say("S3d", m))
+                    if len(r_spans) == len(idxs):
+                        r_audio = pl._AudioSegment.from_file(retry_path)
+                        for i, t, (s, e) in zip(idxs, new_texts, r_spans):
+                            changes.append((i, texts[i], t))
+                            texts[i] = t
+                            segs[i] = r_audio[int(s):int(e)]
+                    else:
+                        _say("S3d", "WARNING: re-voicing returned the wrong "
+                                    "number of lines — keeping the originals.")
+                except Exception as e:                       # noqa: BLE001
+                    _say("S3d", f"WARNING: fit retry synthesis failed ({e}) — "
+                                "keeping the original lines.")
+            if changes:
+                _write_text(base + "_ai_fit_changes.txt", "\n\n".join(
+                    f"Piece {i + 1}\nAPPROVED: {old}\nSPOKEN:   {new}"
+                    for i, old, new in changes) + "\n")
+                _say("S3d", f"{len(changes)} line(s) shortened to fit — the "
+                            "approved and spoken wording is listed in "
+                            f"{os.path.basename(base)}_ai_fit_changes.txt.")
 
-        over = [i for i, sg in enumerate(segs)
-                if len(sg) / 1000.0 > _slot(i) * max_atempo + 0.25]
-        if over and retry_on and retry_cap > 0:
-            _say("S3d", f"{len(over)} piece(s) too long even at "
-                        f"{max_atempo:.2f}x — asking the translator agent to "
-                        f"fit {min(len(over), retry_cap)} of them…")
-            _fit_retry(over, lambda i: _slot(i) * max_atempo * 0.95)
-
-        def _render(cap, lead):
-            """Stretch every piece into its slot (plus lead[i] s for a piece
-            allowed to start early; ceiling cap[i], else max_atempo) and
-            join them. Returns (audio, spans ms, durations s, ratios)."""
-            fitted, f_spans, ratios = None, [], []
-            gap = pl._AudioSegment.silent(duration=pl.SECTION_GAP_MS,
-                                          frame_rate=source.frame_rate)
-            for i, sg in enumerate(segs):
-                dur_ms = max(1.0, float(len(sg)))
-                slot_ms = (_slot(i) + lead.get(i, 0.0)) * 1000.0
-                ratio = 1.0
-                if dur_ms > slot_ms:
-                    ratio = min(dur_ms / slot_ms, cap.get(i, max_atempo))
-                    sg = _stretch_segment(pl, sg, ratio, out_dir, i + 1)
-                ratios.append(ratio)
-                if fitted is None:
-                    fitted, start = sg, 0
-                else:
-                    fitted = fitted + gap
-                    start = len(fitted)
-                    fitted = fitted + sg
-                f_spans.append((start, len(fitted)))
-            return (fitted, f_spans,
-                    [(e - s0) / 1000.0 for (s0, e) in f_spans], ratios)
-
-        rendered = _render({}, {})
-        _say("S3d", f"{sum(1 for r in rendered[3] if r > 1.0)} piece(s) "
-                    f"time-stretched (ceiling {max_atempo:.2f}x).")
-        placed = pl.place_pieces(pieces, rendered[2],
-                                 log=lambda m: _say("S3d", m))
-        # v0.28: the self-correcting loop — measure, fix only the pieces
-        # still off, place again, keep a round only when it is better.
-        rendered, placed = _sync_loop(
-            pl, ctx, pieces, segs, texts, changes, rendered, placed,
-            _render, _fit_retry, _slot, max_atempo,
-            allow_revoice=bool(retry_on) and not getattr(
-                args, "provided_script", None))
-        fitted, fitted_spans, durations, ratios = rendered
+        fitted, fitted_spans, stretched = None, [], 0
+        gap = pl._AudioSegment.silent(duration=pl.SECTION_GAP_MS,
+                                      frame_rate=source.frame_rate)
+        for i, sg in enumerate(segs):
+            dur_ms = max(1.0, float(len(sg)))
+            slot_ms = _slot(i) * 1000.0
+            if dur_ms > slot_ms:
+                sg = _stretch_segment(pl, sg, min(dur_ms / slot_ms, max_atempo),
+                                      out_dir, i + 1)
+                stretched += 1
+            if fitted is None:
+                fitted, start = sg, 0
+            else:
+                fitted = fitted + gap
+                start = len(fitted)
+                fitted = fitted + sg
+            fitted_spans.append((start, len(fitted)))
         fitted.export(tts_path, format="wav")
-        if changes:
-            _write_text(base + "_ai_fit_changes.txt", "\n\n".join(
-                f"Piece {i + 1}\nAPPROVED: {old}\nSPOKEN:   {new}"
-                for i, old, new in changes) + "\n")
-            _say("S3d", f"{len(changes)} line(s) shortened to fit — the "
-                        "approved and spoken wording is listed in "
-                        f"{os.path.basename(base)}_ai_fit_changes.txt.")
+        durations = [(e - s) / 1000.0 for (s, e) in fitted_spans]
+        _say("S3d", f"{stretched} piece(s) time-stretched (ceiling "
+                    f"{max_atempo:.2f}x).")
 
-    if not pl.PYDUB_AVAILABLE:
-        placed = pl.place_pieces(pieces, durations,
-                                 log=lambda m: _say("S3d", m))
-        ratios = [1.0] * len(durations)
+    placed = pl.place_pieces(pieces, durations, log=lambda m: _say("S3d", m))
     placed = _run_sync_check(pl, ctx, pieces, placed, durations)
-    _learn_speed(pl, args, texts, durations, ratios, placed, p_voices,
-                 voice_id, skip={i for i, p in enumerate(pieces)
-                                 if p.get("para") in speed_paras})
     _write_sync_outputs(pl, args, manifest, ctx, tts_path, fitted_spans,
-                        placed, texts, en_wins=en_wins)
-
-
-# ─── v0.28 sync feedback loops ───────────────────────────────────────────────
-
-def _apply_learned_bias(pl, args, pieces):
-    """Shift every piece's target by the start bias learned from the user's
-    final timelines (pipeline/sync_learn). Nothing until enough samples;
-    engine_settings sync_learned_bias: 0 turns it off."""
-    if not _engine_setting("sync_learned_bias", 1, int, 0, 1):
-        return pieces
-    try:
-        bias, n = pl.learned_bias(args.language)
-    except Exception:                                    # noqa: BLE001
-        return pieces
-    if not bias:
-        return pieces
-    _say("S3d", f"Learned start bias {bias * 1000:+.0f} ms (from {n} line(s) "
-                "you placed) — every target shifted.")
-    return pl.bias_windows(pieces, bias)
-
-
-def _sync_loop(pl, ctx, pieces, segs, texts, changes, rendered, placed,
-               render, fit_retry, slot, max_atempo, allow_revoice):
-    """v0.28 self-correcting run (anchor sync): measure -> fix only the
-    pieces still off -> place again -> measure; a round is kept only when
-    it scores better (pipeline/sync_learn.loop_score), otherwise its
-    changes are undone.
-      round 1 (free): an off piece and the piece before it get
-                      sync_extra_atempo more stretch (sync_lead_ms > 0 also
-                      lets an off piece start that much before its English
-                      — off by default: real runs showed it trades on-time
-                      starts for better ends);
-      round 2:        pieces still too long are shortened and re-voiced
-                      (AI-written lines only — never a pasted script).
-    engine_settings: sync_loop (1), sync_loop_rounds (2, 0-2), sync_lead_ms
-    (0), sync_extra_atempo (0.10). Needs the sync check (sync_check=1).
-    Writes <base>_sync_loop.txt. Returns (rendered, placed)."""
-    rounds = _engine_setting("sync_loop_rounds", 2, int, 0, 2)
-    if (not rounds or not _engine_setting("sync_loop", 1, int, 0, 1)
-            or not _engine_setting("sync_check", 1, int, 0, 1)):
-        return rendered, placed
-    tol = _engine_setting("sync_tolerance_ms", 300.0, float, 50.0,
-                          2000.0) / 1000.0
-    lead_s = _engine_setting("sync_lead_ms", 0.0, float, 0.0,
-                             1000.0) / 1000.0
-    extra = _engine_setting("sync_extra_atempo", 0.10, float, 0.0, 0.5)
-    audio_end = float(ctx.get("en_audio_dur") or 0.0)
-
-    def measure(cand, durs):
-        chk, rep = pl.sync_check(pieces, cand, durs, audio_end, tol)
-        return (pl.loop_score(rep, chk, tol), pl.loop_offenders(rep, chk),
-                rep)
-
-    try:
-        score, bad, rep0 = measure(placed, rendered[2])
-    except Exception as e:                               # noqa: BLE001
-        _say("S3d", f"WARNING: sync loop skipped ({e}).")
-        return rendered, placed
-    lines = [f"Round 0 (first pass): {len(bad)} piece(s) off, "
-             f"score {score:.0f}"]
-    if not bad:
-        _say("S3d", "Sync loop: every piece is on time after the first pass.")
-    cap, lead = {}, {}
-    for rnd in range(1, rounds + 1):
-        if not bad:
-            break
-        snap = (list(texts), list(segs), len(changes))
-        cap2, lead2 = dict(cap), dict(lead)
-        for i in set(bad) | {j - 1 for j in bad if j > 0}:
-            cap2[i] = min(2.0, max(cap2.get(i, max_atempo),
-                                   max_atempo + extra))
-        if lead_s:
-            for i in bad:
-                lead2[i] = max(lead2.get(i, 0.0), lead_s)
-        how = "a little more stretch" + (", earlier start allowed"
-                                         if lead_s else "")
-        if rnd >= 2:
-            if not allow_revoice:
-                lines.append(f"Round {rnd}: skipped — this script is never "
-                             "reworded")
-                break
-
-            def budget(i):
-                return (slot(i) + lead2.get(i, 0.0)) * cap2.get(i, max_atempo)
-            # the piece before a late one is usually the one too long
-            near = sorted(set(bad) | {j - 1 for j in bad if j > 0})
-            over = [i for i in near
-                    if len(segs[i]) / 1000.0 > budget(i) + 0.05]
-            done = fit_retry(over, lambda i: budget(i) * 0.95) if over else []
-            if not done:
-                lines.append(f"Round {rnd}: nothing to re-voice (the pieces "
-                             "left are off for other reasons)")
-                break
-            how = f"shortened and re-voiced {len(done)} line(s)"
-        try:
-            cand_r = render(cap2, lead2)
-            relaxed = [dict(p, win=(float(p["win"][0]) - lead2[i],
-                                    float(p["win"][1])))
-                       if i in lead2 and p.get("win") else p
-                       for i, p in enumerate(pieces)]
-            cand_p = pl.place_pieces(relaxed, cand_r[2])
-            s2, bad2, rep2 = measure(cand_p, cand_r[2])
-        except Exception as e:                           # noqa: BLE001
-            texts[:], segs[:] = snap[0], snap[1]
-            del changes[snap[2]:]
-            lines.append(f"Round {rnd}: failed ({e}) — previous placement kept")
-            break
-        # never trade away a synced piece or on-time starts: offline
-        # replays of real runs showed rounds that fixed ends that way
-        keep = (pl.loop_better(s2, bad2, score, bad)
-                and rep2.get("synced", 0) >= rep0.get("synced", 0)
-                and rep2.get("mean_offset_ms", 0)
-                <= rep0.get("mean_offset_ms", 0) + 5)
-        lines.append(f"Round {rnd} ({how}): {len(bad)} -> {len(bad2)} "
-                     f"piece(s) off, score {score:.0f} -> {s2:.0f} — "
-                     + ("kept" if keep else "dropped"))
-        _say("S3d", f"Sync loop round {rnd}: {len(bad)} off -> {len(bad2)} "
-                    f"off ({'kept' if keep else 'dropped'}).")
-        if keep:
-            rendered, placed = cand_r, cand_p
-            score, bad, cap, lead, rep0 = s2, bad2, cap2, lead2, rep2
-        else:
-            texts[:], segs[:] = snap[0], snap[1]
-            del changes[snap[2]:]
-    lines.append(f"Final: {len(bad)} piece(s) still off"
-                 + (" — " + ", ".join(str(i + 1) for i in bad) if bad else ""))
-    try:
-        _write_text(ctx["base"] + "_sync_loop.txt", "\n".join(lines) + "\n")
-    except Exception:                                    # noqa: BLE001
-        pass
-    return rendered, placed
-
-
-def _learn_speed(pl, args, texts, durations, ratios, placed, voices,
-                 voice_id, skip=()):
-    """v0.28: the real speaking speed of this run's voice(s) — characters
-    per second of each synced piece before stretching — folded into the
-    per-language sync profile. Prompt-agents runs never learn; pieces with
-    a reviewer speed are skipped. engine_settings sync_learn_speed: 0 off."""
-    if _is_pagents(args) or not _engine_setting("sync_learn_speed", 1, int,
-                                                0, 1):
-        return
-    try:
-        by_voice = {}
-        for i, (t, d, r) in enumerate(zip(texts, durations, ratios)):
-            if i in skip or placed[i].get("status") != "synced":
-                continue
-            v = (voices[i] if voices else voice_id) or ""
-            # a stretch of r plays the speech r times faster, so the raw
-            # (as voiced) length is the placed length times r
-            by_voice.setdefault(v, []).append(
-                (len(" ".join((t or "").split())),
-                 float(d) * max(float(r), 1.0)))
-        prof = pl.load_sync_profile(args.language)
-        learned = [v for v, smp in by_voice.items()
-                   if pl.merge_cps(prof, v or None, smp)]
-        if learned:
-            prof["runs"] = int(prof.get("runs") or 0) + 1
-            pl.save_sync_profile(prof)
-            _note(f"Speaking speed learned: {args.language} about "
-                  f"{float(prof.get('cps') or 0):.1f} characters/s.")
-    except Exception as e:                               # noqa: BLE001
-        _note(f"WARNING: speaking-speed learning skipped ({e}).")
-
-
-def _write_sync_pieces(base, wins, texts, durations, placed):
-    """v0.28 <base>_sync_pieces.json: every piece's ENGLISH window (before
-    any learned bias), indexed like _sync_timestamps.txt — what "Learn from
-    final dub" compares the user's final positions against."""
-    try:
-        rows = []
-        for i, w in enumerate(wins or []):
-            p = placed[i] if i < len(placed) else {}
-            rows.append({
-                "idx": i + 1,
-                "win": ([round(float(w[0]), 3), round(float(w[1]), 3)]
-                        if w else None),
-                "chars": len(" ".join((texts[i] if i < len(texts)
-                                       else "").split())),
-                "dur": (round(float(durations[i]), 3)
-                        if i < len(durations) else None),
-                "placed": (round(float(p["position"]), 3)
-                           if p.get("position") is not None else None),
-                "status": p.get("status"),
-            })
-        _write_text(base + "_sync_pieces.json",
-                    json.dumps(rows, ensure_ascii=False, indent=2))
-    except Exception as e:                               # noqa: BLE001
-        _note(f"WARNING: piece windows not saved ({e}).")
+                        placed, texts)
 
 
 def _el_settings():
@@ -2642,8 +2110,7 @@ def _stage_translate_eleven(pl, args, api_key, manifest, ctx):
     en_srt_text, en_audio_dur, punc_result, plus el_rows (review rows)."""
     audio_path = ctx["audio_path"]
     language = args.language
-    out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
-                                     language=args.language)
+    out_dir, base = _prepare_out_dir(pl, audio_path, manifest)
     ctx["out_dir"], ctx["base"] = out_dir, base
     el_path = base + EL_DUB_SUFFIX
     for stale in (el_path, base + "_ai_draft.json", base + "_ai_report.txt",
@@ -3011,7 +2478,7 @@ def _run_sync_check(pl, ctx, pieces, placed, durations):
 
 
 def _write_sync_outputs(pl, args, manifest, ctx, tts_path, spans, placed,
-                        texts, en_wins=None):
+                        texts):
     """S3d files + S3e render for a placed piece list — the same artifacts
     and manifest keys match mode writes (timestamps with [synced]/[unsync],
     texts sidecar, synced SRT, synced-only wav)."""
@@ -3033,9 +2500,6 @@ def _write_sync_outputs(pl, args, manifest, ctx, tts_path, spans, placed,
         " ".join((t or "").split()) or EMPTY_PARAGRAPH_PLACEHOLDER
         for t in texts) + "\n")
     manifest["sync_texts"] = texts_path
-    if en_wins is not None and len(en_wins) == len(placed):
-        _write_sync_pieces(base, en_wins, texts,
-                           [(e - s0) / 1000.0 for (s0, e) in spans], placed)
     synced_entries = [e for e in entries if e["sync_status"] == "synced"]
     unsynced_n = len(entries) - len(synced_entries)
     manifest["synced_count"] = str(len(synced_entries))
@@ -3431,8 +2895,7 @@ def _stage_pause_plan(pl, args, api_key, manifest, ctx):
     audio_path = ctx["audio_path"]
     pause_min_s, thr_db, max_atempo, rate_override = _plan_settings(pl)
 
-    out_dir, base = _prepare_out_dir(pl, audio_path, manifest,
-                                     language=args.language)
+    out_dir, base = _prepare_out_dir(pl, audio_path, manifest)
     ctx["out_dir"], ctx["base"] = out_dir, base
 
     # ── [S1a] Transcription — disk-cached, so Reload is free ────────────────
@@ -3755,101 +3218,6 @@ def _run_dubplan(args, manifest):
     _say("S3e", f"Synced audio saved: {os.path.basename(synced_path)}")
 
 
-def _tighten_segment(seg, min_ms=None, keep_ms=None):
-    """v0.28.2 Speed up removes pauses: every silence INSIDE the line (and
-    at its end) longer than min_ms is cut down to keep_ms, so the voice
-    does not stop mid-line; the words and the opening silence are left
-    alone (the clip's start stays where it was placed). Silence = 16 dB
-    under the line's own loudness. Returns (segment, ms cut); any problem
-    returns the segment unchanged. engine_settings: speed_tighten (1),
-    speed_pause_min_ms (250), speed_pause_keep_ms (120)."""
-    if not _engine_setting("speed_tighten", 1, int, 0, 1):
-        return seg, 0
-    min_ms = min_ms or _engine_setting("speed_pause_min_ms", 250, int, 80,
-                                       2000)
-    keep_ms = keep_ms if keep_ms is not None else _engine_setting(
-        "speed_pause_keep_ms", 120, int, 0, 1000)
-    try:
-        from pydub.silence import detect_silence
-        if len(seg) < 2 * min_ms or seg.dBFS == float("-inf"):
-            return seg, 0
-        quiet = detect_silence(seg, min_silence_len=min_ms,
-                               silence_thresh=seg.dBFS - 16, seek_step=5)
-        out, pos, cut = None, 0, 0
-        for a, b in quiet:
-            if a <= 0:                    # opening silence: keep the start
-                continue
-            keep = min(keep_ms, b - a)
-            head = seg[pos:a + keep // 2]
-            out = head if out is None else out + head
-            pos = b - (keep - keep // 2)
-            cut += (b - a) - keep
-        if not cut:
-            return seg, 0
-        tail = seg[pos:]
-        out = tail if out is None else out + tail
-        return out, int(cut)
-    except Exception:                                    # noqa: BLE001
-        return seg, 0
-
-
-def _run_tighten_pauses(args, manifest):
-    """--tighten-pauses: the Regenerate tab's Speed up shortens the long
-    pauses of the selected clips. Each 'T:' clip (a slice of a wav on the
-    timeline) is cut out, its pauses shortened, and saved as a new wav; the
-    panel swaps it in and keeps the playback speed. No API calls."""
-    import hashlib
-    manifest["pause_txt"] = ""
-    manifest["pause_count"] = "0"
-    in_path = os.path.abspath(os.path.expanduser(args.text_file))
-    if not os.path.isfile(in_path):
-        raise RuntimeError(f"--text-file not found: {in_path}")
-    out_dir, jobs = "", []
-    for line in _read_text(in_path).lstrip("\ufeff").splitlines():
-        line = line.rstrip("\r")
-        if line.startswith("OUT:"):
-            out_dir = line[4:].strip()
-        elif line.startswith("T:"):
-            parts = line[2:].strip().split("|", 3)
-            try:
-                jobs.append((parts[0].strip(), float(parts[1]),
-                             float(parts[2]), parts[3].strip()))
-            except (IndexError, ValueError):
-                continue
-    if not out_dir or not jobs:
-        raise RuntimeError("The pause request names no clips.")
-    os.makedirs(out_dir, exist_ok=True)
-    pl = _import_pipeline()
-    if not pl.PYDUB_AVAILABLE:
-        raise RuntimeError("pydub is not available — pauses cannot be "
-                           "shortened.")
-    sources, lines, n, total = {}, [], 0, 0
-    for key, offs, length, src in jobs:
-        try:
-            if src not in sources:
-                sources[src] = pl._AudioSegment.from_file(src)
-            clip = sources[src][int(offs * 1000):int((offs + length) * 1000)]
-            tight, cut = _tighten_segment(clip)
-            if cut < 40:
-                continue
-            tag = hashlib.sha1(f"{key}|{offs}|{src}".encode("utf-8")
-                               ).hexdigest()[:10]
-            path = os.path.join(out_dir, f"tight_{tag}.wav")
-            # close the handle: Windows keeps an open file locked from REAPER
-            tight.export(path, format="wav").close()
-            lines.append(f"T: {key}|{len(tight) / 1000.0:.3f}|{cut}|{path}")
-            n += 1
-            total += cut
-        except Exception as e:                           # noqa: BLE001
-            _note(f"WARNING: pauses not shortened for one clip ({e}).")
-    out_path = in_path + ".out"
-    _write_text(out_path, "\n".join(lines) + "\n")
-    manifest["pause_txt"] = out_path
-    manifest["pause_count"] = str(n)
-    _note(f"Pauses shortened in {n} of {len(jobs)} clip(s) "
-          f"({total / 1000.0:.1f} s removed).")
-
-
 def _stretch_segment(pl, seg, ratio, out_dir, n):
     """Time-stretch one pydub segment via ffmpeg; return the new segment.
 
@@ -4054,8 +3422,7 @@ def _run_dub(args, manifest):
     _note(f"Dub voice: {voice_id} ({voice_how})")
 
     out_dir, base = _prepare_out_dir(pl, ctx["audio_path"], manifest,
-                                     test=_test_suffix(args),
-                                     language=args.language)
+                                     test=_test_suffix(args))
     ctx["out_dir"], ctx["base"] = out_dir, base
 
     # The translate stage must have run first in this out_dir.
@@ -4099,9 +3466,9 @@ def _run_dub(args, manifest):
         _note(f"WARNING: marker {marker!r} not found in "
               f"{os.path.basename(fs_path)} — FinalScript left unchanged.")
 
-    if _is_pagents(args):
-        _note("Test mode (Prompt agents): nothing is learned from this run.")
-    elif _learns(args):
+    if _is_test(args):
+        _note("Test mode (AI · test rules): nothing is learned from this run.")
+    elif _ai_source(args):
         _maybe_ai_learn(pl, args, base, script_text)
 
     # English audio duration for the sync algorithm (local decode, no API).
@@ -4277,63 +3644,6 @@ def _run_suggest_fit(args, manifest):
     _note(f"{total} suggestion(s) written.")
 
 
-def _parse_fit_chunks(text):
-    """The panel's --fit-chunks request: optional CPS:/PREV:/NEXT: header
-    lines, then '@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per chunk.
-    Returns (rows, cps, prev, next)."""
-    rows, cur, cps, prev, nxt = [], None, 0.0, "", ""
-    for line in (text or "").splitlines():
-        if line.startswith("@@"):
-            parts = line[2:].split()
-            try:
-                cur = {"k": int(parts[0]), "len": float(parts[1]),
-                       "en": "", "cur": ""}
-                rows.append(cur)
-            except (IndexError, ValueError):
-                cur = None
-        elif line.startswith("CPS:"):
-            try:
-                cps = float(line[4:].strip())
-            except ValueError:
-                pass
-        elif line.startswith("PREV:"):
-            prev = line[5:].strip()
-        elif line.startswith("NEXT:"):
-            nxt = line[5:].strip()
-        elif cur is not None and line.startswith("EN:"):
-            cur["en"] = line[3:].strip()
-        elif cur is not None and line.startswith("CUR:"):
-            cur["cur"] = line[4:].strip()
-    return rows, cps, prev, nxt
-
-
-def _run_fit_chunks(args, manifest):
-    """--fit-chunks: one fresh line per selected chunk, sized to where the
-    reviewer placed it. Text-only; UTF-8 files both ways (never argv)."""
-    manifest["fit_txt"] = ""
-    manifest["fit_count"] = "0"
-    in_path = os.path.abspath(os.path.expanduser(args.text_file))
-    if not os.path.isfile(in_path):
-        raise RuntimeError(f"--text-file not found: {in_path}")
-    rows, cps, prev, nxt = _parse_fit_chunks(_read_text(in_path))
-    if not rows:
-        raise RuntimeError("The fit request has no chunks.")
-    _note("Importing pipeline modules…")
-    pl = _import_pipeline()
-    _check_symbols(pl)
-    pl._validate_llm_config()
-    _note(f"Writing {args.language} lines for {len(rows)} placed chunk(s)…")
-    got = pl.fit_chunks(rows, args.language, cps, prev, nxt,
-                        pl.GEMINI_DEFAULT_MODEL,
-                        house_rules=_house_rules_on(args))
-    blocks = [f"@@ {k}\n{got[k]}" for k in sorted(got)]
-    out_path = in_path + ".out"
-    _write_text(out_path, "\n\n".join(blocks) + "\n")
-    manifest["fit_txt"] = out_path
-    manifest["fit_count"] = str(len(got))
-    _note(f"{len(got)} of {len(rows)} line(s) written.")
-
-
 def _run_review_assist(args, manifest):
     """--review-assist: answer the reviewer's instruction for one line.
     Request and answer travel as UTF-8 files (Indic text never on argv)."""
@@ -4429,44 +3739,6 @@ REGEN_EDITS_SUFFIX = "_regen_edits.jsonl"
 LEARN_KEYS_MAX = 5000            # learned pair/correction keys remembered
 
 
-_SENT_SPLIT = re.compile(r"(?<=[।.!?;])\s+")
-
-
-def _sentences(text):
-    return [s.strip() for s in _SENT_SPLIT.split(" ".join((text or "").split()))
-            if len(s.strip()) > 15]
-
-
-def _repeated_sentences(text):
-    """v0.28.4: sentences that occur twice IN A ROW in *text* — the mark a
-    split clip leaves when its halves both carry the whole line (a speaker
-    who repeats himself does it with a sentence in between, or not word for
-    word, far more often than back to back)."""
-    s = _sentences(text)
-    return [a for a, b in zip(s, s[1:]) if a == b]
-
-
-def _merge_split_chunks(chunks):
-    """v0.28.4 learn-final: a clip split (S) or copied in REAPER keeps its
-    WHOLE text on every half, so the timeline holds the same line two or
-    three times side by side. Neighbouring clips whose text is the same,
-    or contained in the neighbour's, become one clip spanning both.
-    Returns (chunks, how many were merged)."""
-    out, merged = [], 0
-    for s, n, t in chunks:
-        if out:
-            ps, pn, pt = out[-1]
-            a = " ".join(pt.split())
-            b = " ".join(t.split())
-            if len(b) > 15 and (a == b or b in a or a in b):
-                end = max(ps + pn, s + n)
-                out[-1] = (ps, end - ps, pt if len(a) >= len(b) else t)
-                merged += 1
-                continue
-        out.append((s, n, t))
-    return out, merged
-
-
 def _parse_learn_request(text):
     """Request file -> (base, [(start_s, len_s, text)] in timeline order).
     'BASE: <abs run base path, no suffix>' and 'C: <start>|<len>|<text>'
@@ -4489,93 +3761,6 @@ def _parse_learn_request(text):
                 chunks.append((s, n, t))
     chunks.sort(key=lambda c: c[0])
     return base, chunks
-
-
-def _parse_learn_pieces(text):
-    """v0.28 optional 'P: <piece>|<start>|<len>|<region offset>' lines of a
-    learn request — clips the importer stamped with their engine piece.
-    Requests from older panels have none."""
-    out = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line.startswith("P:"):
-            continue
-        parts = line[2:].strip().split("|")
-        try:
-            idx, pos, ln = int(parts[0]), float(parts[1]), float(parts[2])
-            off = float(parts[3]) if len(parts) > 3 else 0.0
-        except (ValueError, IndexError):
-            continue
-        if idx > 0:
-            out.append((idx, pos, ln, off))
-    return out
-
-
-SYNC_LEARNED_SUFFIX = "_sync_learned.json"
-
-
-def _learn_mode(text):
-    """v0.29: 'script', 'sync' or 'both' (a request without a MODE: line,
-    from a panel older than v0.29)."""
-    for line in (text or "").splitlines():
-        if line.strip().startswith("MODE:"):
-            v = line.strip()[5:].strip().lower()
-            if v in ("script", "sync"):
-                return v
-    return "both"
-
-
-def _learn_sync_final(base, text, language):
-    """v0.28: learn the user's start bias from where they left the dub
-    clips (final start - English start of the same piece). Returns the
-    'SYNC: ...' line for the .out file ("" when there is nothing to say).
-    Fail-open; its own marker, so a timing-only fix is still learned when
-    the text was learned before. engine_settings sync_learn_bias: 0 off."""
-    import hashlib
-    if not _engine_setting("sync_learn_bias", 1, int, 0, 1):
-        return ""
-    final = _parse_learn_pieces(text)
-    if not final:
-        return ("SYNC: timing not learned — no original dub clips found "
-                "(import the run again with this version)")
-    pieces_path = base + "_sync_pieces.json"
-    if not os.path.isfile(pieces_path):
-        return ("SYNC: timing not learned — this run was dubbed before "
-                "v0.28 (no piece windows)")
-    try:
-        rows = json.loads(_read_text(pieces_path)) or []
-        digest = hashlib.sha256(repr(sorted(final)).encode("utf-8")).hexdigest()
-        marker_path = base + SYNC_LEARNED_SUFFIX
-        try:
-            if json.loads(_read_text(marker_path)).get("sha256") == digest:
-                return "SYNC: timing already learned from this dub"
-        except Exception:
-            pass
-        if ENGINE_DIR not in sys.path:
-            sys.path.insert(0, ENGINE_DIR)
-        from pipeline import sync_learn as sl
-        leads = sl.leads_from_final(rows, final)
-        prof = sl.load_sync_profile(language)
-        ok, n = sl.merge_bias(prof, leads)
-        if not ok:
-            return (f"SYNC: timing not learned — only {n} usable clip(s), "
-                    f"{sl.BIAS_MIN_RUN} needed")
-        prof["runs"] = int(prof.get("runs") or 0) + 1
-        sl.save_sync_profile(prof)
-        _write_text(marker_path, json.dumps({
-            "sha256": digest, "clips": n,
-            "learned_at": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2))
-        bias_ms = float(prof["start_bias_s"]) * 1000.0
-        wait = int(prof["bias_samples"]) < sl.BIAS_MIN_SAMPLES
-        _note(f"Sync learning: {n} clip(s); start bias now {bias_ms:+.0f} ms "
-              f"from {prof['bias_samples']} line(s).")
-        return (f"SYNC: learned timing from {n} clip(s); start bias "
-                f"{bias_ms:+.0f} ms"
-                + (f" (used after {sl.BIAS_MIN_SAMPLES} lines, now "
-                   f"{prof['bias_samples']})" if wait else ""))
-    except Exception as e:                               # noqa: BLE001
-        _note(f"WARNING: sync learning failed ({e}).")
-        return "SYNC: timing not learned (an error — see the log)"
 
 
 def _learn_norm(s):
@@ -4775,41 +3960,21 @@ def _run_learn_final(args, manifest):
     if not os.path.isfile(in_path):
         raise RuntimeError(f"--text-file not found: {in_path}")
     base, chunks = _parse_learn_request(_read_text(in_path))
-    chunks, n_split = _merge_split_chunks(chunks)
-    if n_split:
-        _note(f"AI learning: {n_split} clip(s) repeat their neighbour's text "
-              "(a clip split or copied in REAPER keeps its whole text) — "
-              "that text is learned once.")
     if not base or not os.path.isdir(os.path.dirname(base) or "."):
         raise RuntimeError("The learn request names no usable run folder "
                            f"(BASE: {base or '(missing)'}).")
-    if _is_ptest_base(base):
+    if _is_test_base(base):
         raise RuntimeError(
-            "This dub was made with 'Prompt agents · test' (a _PTEST folder). "
-            "Prompt-agent runs never teach AI mode — dub it with 'AI · learns' "
-            "or 'AI · test rules' to learn from it.")
+            "This dub was made with 'AI · test rules' (a _TEST folder). Test "
+            "runs never teach AI mode — dub it with 'AI · learns' to learn "
+            "from it.")
     if not chunks:
         raise RuntimeError("The learn request has no dub chunks with text.")
     out_path = in_path + ".out"
-    # v0.29: script learning and sync learning are separate buttons; the
-    # request says which ("MODE: script" / "MODE: sync"; none = both, as
-    # older panels sent). Timing has its own marker, so it is learned even
-    # when this dub's text was already learned.
-    req_text = _read_text(in_path)
-    mode = _learn_mode(req_text)
-    sync_line = (_learn_sync_final(base, req_text, args.language)
-                 if mode in ("both", "sync") else "")
 
     def finish(lines):
-        _write_text(out_path, "\n".join(
-            lines + ([sync_line] if sync_line else [])
-            + [f"MODE: {mode}"]) + "\n")
+        _write_text(out_path, "\n".join(lines) + "\n")
         manifest["learn_txt"] = out_path
-
-    if mode == "sync":
-        _note("Sync learning only — the script memory is not touched.")
-        finish(["PAIRS: 0", "CORRECTIONS: 0", "HELD: 0"])
-        return
 
     final_text = "\n\n".join(c[2] for c in chunks)
     digest = hashlib.sha256(final_text.strip().encode("utf-8")).hexdigest()
@@ -4854,9 +4019,6 @@ def _run_learn_final(args, manifest):
                               pl.GEMINI_DEFAULT_MODEL,
                               source=os.path.basename(base) + " (final)",
                               status_cb=_note)
-    if covers:
-        _save_final_windows(pl, args.language, final_text, chunks,
-                            _read_text(in_path))
     held = res.get("held_back") or []
     nothing = not pairs and not corrections
     if res.get("ok") or nothing:
@@ -4946,15 +4108,7 @@ def main() -> int:
     if args.selfcheck:
         return _selfcheck(args)
 
-    if args.clear_memory:
-        keys, runner, ok_status = (CLEARMEM_MANIFEST_KEYS, _run_clear_memory,
-                                   "ok")
-    elif args.tighten_pauses:
-        keys, runner, ok_status = (PAUSE_MANIFEST_KEYS, _run_tighten_pauses,
-                                   "ok")
-    elif args.fit_chunks:
-        keys, runner, ok_status = FITCH_MANIFEST_KEYS, _run_fit_chunks, "ok"
-    elif args.learn_final:
+    if args.learn_final:
         keys, runner, ok_status = LEARNF_MANIFEST_KEYS, _run_learn_final, "ok"
     elif args.recommend_voice:
         keys, runner, ok_status = RECO_MANIFEST_KEYS, _run_recommend_voice, "ok"
