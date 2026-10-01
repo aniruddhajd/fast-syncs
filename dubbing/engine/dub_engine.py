@@ -314,6 +314,8 @@ TEST_LLM_MANIFEST_KEYS = ["status", "error", "provider", "model", "reply"]
 SUGGEST_MANIFEST_KEYS = ["status", "error", "suggest_txt", "suggest_count"]
 # v0.32 --fit-chunks (regen tab: one line per placed chunk)
 FITCH_MANIFEST_KEYS = ["status", "error", "fit_txt", "fit_count"]
+# v0.28.2 --tighten-pauses (regen tab Speed up): the shortened takes
+PAUSE_MANIFEST_KEYS = ["status", "error", "pause_txt", "pause_count"]
 # v0.18.6 --review-assist: the review screen assistant
 ASSIST_MANIFEST_KEYS = ["status", "error", "assist_txt"]
 # v0.19 --recommend-voice: voice recommendations for the regen tab
@@ -452,6 +454,15 @@ def _parse_args():
                          "'@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per "
                          "chunk; writes <text-file>.out ('@@ <k>' then the "
                          "line). Text-only LLM call, no audio, no TTS.")
+    ap.add_argument("--tighten-pauses", dest="tighten_pauses",
+                    action="store_true",
+                    help="v0.28.2 regen tab Speed up: shorten the long "
+                         "silences inside dub clips (words untouched). "
+                         "--text-file (UTF-8): 'OUT: <dir>' and one "
+                         "'T: <key>|<offset_s>|<length_s>|<source wav>' "
+                         "line per clip; writes <text-file>.out "
+                         "('T: <key>|<new length_s>|<cut ms>|<new wav>'). "
+                         "Local audio only — no API calls, no credits.")
     ap.add_argument("--recommend-voice", dest="recommend_voice",
                     action="store_true",
                     help="v0.19: recommend voices from the account catalogue "
@@ -491,6 +502,10 @@ def _parse_args():
     args = ap.parse_args()
 
     if args.selfcheck:
+        return args
+    if args.tighten_pauses:
+        if not args.text_file:
+            ap.error("--tighten-pauses requires --text-file")
         return args
     if args.review_assist or args.recommend_voice or args.learn_final \
        or args.fit_chunks:
@@ -2067,12 +2082,21 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
         speed_paras = set(speeds or ())
         if speeds:
             n_sp = 0
+            cut_ms = 0
             for i, p in enumerate(pieces):
                 f = speeds.get(p.get("para"))
                 if f:
+                    # v0.28.2: a faster line also loses its long pauses
+                    # (same words, shorter silences), then is sped up
+                    if f > 1.0:
+                        segs[i], c = _tighten_segment(segs[i])
+                        cut_ms += c
                     segs[i] = _stretch_segment(pl, segs[i], f, out_dir,
                                                1000 + i)
                     n_sp += 1
+            if cut_ms:
+                _say("S3d", f"Speed up: {cut_ms / 1000.0:.1f} s of long "
+                            "pauses shortened in the faster lines.")
             _say("S3d", f"Reviewer speed applied to {n_sp} piece(s) in "
                         f"{len(speeds)} paragraph(s).")
         changes = []
@@ -3515,6 +3539,101 @@ def _run_dubplan(args, manifest):
     _say("S3e", f"Synced audio saved: {os.path.basename(synced_path)}")
 
 
+def _tighten_segment(seg, min_ms=None, keep_ms=None):
+    """v0.28.2 Speed up removes pauses: every silence INSIDE the line (and
+    at its end) longer than min_ms is cut down to keep_ms, so the voice
+    does not stop mid-line; the words and the opening silence are left
+    alone (the clip's start stays where it was placed). Silence = 16 dB
+    under the line's own loudness. Returns (segment, ms cut); any problem
+    returns the segment unchanged. engine_settings: speed_tighten (1),
+    speed_pause_min_ms (250), speed_pause_keep_ms (120)."""
+    if not _engine_setting("speed_tighten", 1, int, 0, 1):
+        return seg, 0
+    min_ms = min_ms or _engine_setting("speed_pause_min_ms", 250, int, 80,
+                                       2000)
+    keep_ms = keep_ms if keep_ms is not None else _engine_setting(
+        "speed_pause_keep_ms", 120, int, 0, 1000)
+    try:
+        from pydub.silence import detect_silence
+        if len(seg) < 2 * min_ms or seg.dBFS == float("-inf"):
+            return seg, 0
+        quiet = detect_silence(seg, min_silence_len=min_ms,
+                               silence_thresh=seg.dBFS - 16, seek_step=5)
+        out, pos, cut = None, 0, 0
+        for a, b in quiet:
+            if a <= 0:                    # opening silence: keep the start
+                continue
+            keep = min(keep_ms, b - a)
+            head = seg[pos:a + keep // 2]
+            out = head if out is None else out + head
+            pos = b - (keep - keep // 2)
+            cut += (b - a) - keep
+        if not cut:
+            return seg, 0
+        tail = seg[pos:]
+        out = tail if out is None else out + tail
+        return out, int(cut)
+    except Exception:                                    # noqa: BLE001
+        return seg, 0
+
+
+def _run_tighten_pauses(args, manifest):
+    """--tighten-pauses: the Regenerate tab's Speed up shortens the long
+    pauses of the selected clips. Each 'T:' clip (a slice of a wav on the
+    timeline) is cut out, its pauses shortened, and saved as a new wav; the
+    panel swaps it in and keeps the playback speed. No API calls."""
+    import hashlib
+    manifest["pause_txt"] = ""
+    manifest["pause_count"] = "0"
+    in_path = os.path.abspath(os.path.expanduser(args.text_file))
+    if not os.path.isfile(in_path):
+        raise RuntimeError(f"--text-file not found: {in_path}")
+    out_dir, jobs = "", []
+    for line in _read_text(in_path).lstrip("\ufeff").splitlines():
+        line = line.rstrip("\r")
+        if line.startswith("OUT:"):
+            out_dir = line[4:].strip()
+        elif line.startswith("T:"):
+            parts = line[2:].strip().split("|", 3)
+            try:
+                jobs.append((parts[0].strip(), float(parts[1]),
+                             float(parts[2]), parts[3].strip()))
+            except (IndexError, ValueError):
+                continue
+    if not out_dir or not jobs:
+        raise RuntimeError("The pause request names no clips.")
+    os.makedirs(out_dir, exist_ok=True)
+    pl = _import_pipeline()
+    if not pl.PYDUB_AVAILABLE:
+        raise RuntimeError("pydub is not available — pauses cannot be "
+                           "shortened.")
+    sources, lines, n, total = {}, [], 0, 0
+    for key, offs, length, src in jobs:
+        try:
+            if src not in sources:
+                sources[src] = pl._AudioSegment.from_file(src)
+            clip = sources[src][int(offs * 1000):int((offs + length) * 1000)]
+            tight, cut = _tighten_segment(clip)
+            if cut < 40:
+                continue
+            tag = hashlib.sha1(f"{key}|{offs}|{src}".encode("utf-8")
+                               ).hexdigest()[:10]
+            path = os.path.join(out_dir, f"tight_{tag}.wav")
+            # close the handle: Windows keeps an open file locked from REAPER
+            tight.export(path, format="wav").close()
+            lines.append(f"T: {key}|{len(tight) / 1000.0:.3f}|{cut}|{path}")
+            n += 1
+            total += cut
+        except Exception as e:                           # noqa: BLE001
+            _note(f"WARNING: pauses not shortened for one clip ({e}).")
+    out_path = in_path + ".out"
+    _write_text(out_path, "\n".join(lines) + "\n")
+    manifest["pause_txt"] = out_path
+    manifest["pause_count"] = str(n)
+    _note(f"Pauses shortened in {n} of {len(jobs)} clip(s) "
+          f"({total / 1000.0:.1f} s removed).")
+
+
 def _stretch_segment(pl, seg, ratio, out_dir, n):
     """Time-stretch one pydub segment via ffmpeg; return the new segment.
 
@@ -4543,7 +4662,10 @@ def main() -> int:
     if args.selfcheck:
         return _selfcheck(args)
 
-    if args.fit_chunks:
+    if args.tighten_pauses:
+        keys, runner, ok_status = (PAUSE_MANIFEST_KEYS, _run_tighten_pauses,
+                                   "ok")
+    elif args.fit_chunks:
         keys, runner, ok_status = FITCH_MANIFEST_KEYS, _run_fit_chunks, "ok"
     elif args.learn_final:
         keys, runner, ok_status = LEARNF_MANIFEST_KEYS, _run_learn_final, "ok"

@@ -1660,6 +1660,7 @@ function V5.quiet_label()
   if V5.quiet_job == "reco" then return "Recommending voices" end
   if V5.quiet_job == "learnf" then return "Learning from the final dub" end
   if V5.quiet_job == "fitchunks" then return "Writing a line for each chunk" end
+  if V5.quiet_job == "tighten" then return "Shortening the pauses" end
   return "Still fetching the ElevenLabs voices"
 end
 
@@ -3088,6 +3089,8 @@ local MANIFEST_KEYS = {
   "reco_txt",
   -- v0.21: --learn-final manifest (Learn from final dub summary file).
   "learn_txt",
+  -- v0.32 --fit-chunks and v0.28.2 --tighten-pauses answer files.
+  "fit_txt", "fit_count", "pause_txt", "pause_count",
   -- v0.13: pause-aware plan manifest ("status":"plan"). The counts are
   -- strings like every other numeric field here — json_field returns
   -- numbers as text and every consumer tonumber()s what it needs.
@@ -3747,6 +3750,10 @@ local function build_engine_cmd(py, opts)
   -- v0.32 regen tab: one line per placed chunk (request in opts.text_file).
   if opts.fit_chunks then
     parts[#parts + 1] = '--fit-chunks'
+  end
+  -- v0.28.2 regen tab Speed up: shorten the clips' long pauses.
+  if opts.tighten_pauses then
+    parts[#parts + 1] = '--tighten-pauses'
   end
   if opts.voice_change then
     parts[#parts + 1] = '--voice-change'
@@ -6816,6 +6823,7 @@ local function apply_regen_result(wav)
   end
   reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", basename(wav), true)
   V5.set_item_text(item, p.note or "")
+  reaper.GetSetMediaItemInfo_String(item, "P_EXT:fastsyncs_tight", "", true)
   -- v0.18.9: several chunks regenerated as ONE line — the combined take now
   -- lives on the first chunk; the others go, in this same undo step, so one
   -- Ctrl+Z brings every original chunk back.
@@ -7499,6 +7507,55 @@ local function _finish_run(exit_code)
 
   -- v0.32 "Write a line for each chunk" — quiet: the lines land in the
   -- Regenerate tab for review; nothing is voiced yet.
+  -- v0.28.2 Speed up: swap in the takes with shortened pauses.
+  if _run_mode == "tighten" then
+    local asked = V5.tighten_guids or {}
+    V5.tighten_guids = nil
+    if cancelled then
+      ui_set_banner("warn", "Shortening the pauses was cancelled.")
+    elseif m and m.status == "ok" and exit_code == 0 then
+      local n, cut = 0, 0
+      reaper.Undo_BeginBlock()
+      reaper.PreventUIRefresh(1)
+      for line in ((read_all(m.pause_txt) or '') .. '\n'):gmatch('([^\n]*)\n') do
+        local g, nl, c, wav = line:gsub('\r$', ''):match(
+          '^T:%s*(.-)|([%d%.]+)|(%d+)|(.+)$')
+        local it   = g and _find_item_by_guid(g)
+        local take = it and reaper.GetActiveTake(it)
+        local src  = take and file_exists(wav)
+                     and reaper.PCM_Source_CreateFromFile(wav)
+        if src then
+          local rate = reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE')
+          if rate <= 0 then rate = 1.0 end
+          reaper.SetMediaItemTake_Source(take, src)
+          reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
+          reaper.SetMediaItemInfo_Value(it, "D_LENGTH",
+                                        (tonumber(nl) or 0) / rate)
+          n, cut = n + 1, cut + (tonumber(c) or 0)
+        end
+      end
+      -- every asked clip is done, shortened or not: no second request
+      for _, g in ipairs(asked) do
+        local it = _find_item_by_guid(g)
+        if it then
+          reaper.GetSetMediaItemInfo_String(it, V5.ITEM_TIGHT_KEY, "1", true)
+        end
+      end
+      reaper.PreventUIRefresh(-1)
+      reaper.UpdateArrange()
+      reaper.Undo_EndBlock("Shorten the pauses of sped-up dub chunk(s)", -1)
+      ui_set_banner("info", n > 0
+        and string.format("Speed up: long pauses shortened in %d chunk(s) " ..
+                          "(%.1f s removed). Ctrl+Z puts them back.", n,
+                          cut / 1000)
+        or "Speed up: no long pauses to shorten in the selected chunk(s).")
+    else
+      ui_set_banner("error", "Shortening the pauses failed:\n" ..
+                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
+    end
+    return
+  end
+
   if _run_mode == "fitchunks" then
     local F = V5.fit
     if F then F.pending = nil end
@@ -8675,6 +8732,53 @@ function V5.set_item_rate(item, f)
   return true
 end
 
+-- v0.28.2: Speed up also removes pauses. The first time a clip is sped up,
+-- the engine cuts its long silences (inside the line and at its end) down
+-- to a short breath — same words, no API call, no credits — and the panel
+-- swaps the shorter take in at the same speed. Once per take (P_EXT flag);
+-- a regenerated take starts fresh.
+V5.ITEM_TIGHT_KEY = "P_EXT:fastsyncs_tight"
+
+function V5.tighten_request(items)
+  if V5.busy() or (_regen_out_dir or "") == "" then return false end
+  local lines = { 'OUT: ' .. _regen_out_dir .. SEP .. 'regen' }
+  local guids = {}
+  for _, it in ipairs(items or {}) do
+    local _, done = reaper.GetSetMediaItemInfo_String(it, V5.ITEM_TIGHT_KEY,
+                                                      "", false)
+    local take = reaper.GetActiveTake(it)
+    if done ~= "1" and take then
+      local src  = reaper.GetMediaItemTake_Source(take)
+      local path = src and reaper.GetMediaSourceFileName(src, "") or ""
+      local rate = reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE')
+      if rate <= 0 then rate = 1.0 end
+      local offs = reaper.GetMediaItemTakeInfo_Value(take, 'D_STARTOFFS')
+      local len  = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH') * rate
+      if path ~= "" and len > 0.3 then
+        local g = _item_guid(it)
+        lines[#lines + 1] = string.format('T: %s|%.3f|%.3f|%s', g, offs,
+                                          len, path)
+        guids[#guids + 1] = g
+      end
+    end
+  end
+  if #guids == 0 then return false end
+  local path = _regen_out_dir .. SEP .. '_tighten.txt'
+  local f = io.open(path, 'wb')
+  if not f then return false end
+  f:write(table.concat(lines, '\n') .. '\n')
+  f:close()
+  local py = preflight_engine(false)
+  if not py then return false end
+  local cmd = build_engine_cmd(py, { tighten_pauses = true, text_file = path,
+    language = (_regen_lang ~= '' and _regen_lang) or LANGUAGE })
+  V5.tighten_guids = guids
+  return launch_engine(cmd, "tighten", {
+    "[panel] Python : " .. py,
+    "[panel] Mode   : shorten the pauses of " .. #guids .. " sped-up chunk(s)",
+  }, true)
+end
+
 function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   local guid = key or _item_guid(item)
   local A = V5.regen_assist_state(guid)
@@ -8683,6 +8787,8 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   -- Speed applies to every selected chunk at once.
   local function set_all(f)
     for _, it in ipairs(items) do V5.set_item_rate(it, f) end
+    -- v0.28.2: faster also means shorter pauses (once per take)
+    if f > 1.001 then V5.tighten_request(items) end
   end
 
   -- Speed (instant, on the current take).
@@ -8699,7 +8805,9 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
   if reaper.ImGui_SmallButton(ctx, '+##rgspup') then
     set_all(rate + (V5.SPEED_STEP or 0.05))
   end
-  V5.hint(ctx, 'Faster (up to x1.25), pitch kept.')
+  V5.hint(ctx, 'Faster (up to x1.25), pitch kept. The first speed-up also ' ..
+               'shortens the long pauses inside the line (same words, no ' ..
+               'credits; Ctrl+Z puts them back).')
   if math.abs(rate - 1.0) > 0.005 then
     reaper.ImGui_SameLine(ctx, 0, 4)
     if reaper.ImGui_SmallButton(ctx, 'reset##rgsprs') then

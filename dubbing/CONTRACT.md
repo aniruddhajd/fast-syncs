@@ -168,6 +168,23 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+31. **v0.28.2: Speed up also shortens pauses** (the words never change).
+    - Review screen: a paragraph with a reviewer speed > 1 has its long
+      silences (inside the line and at its end, > `speed_pause_min_ms` 250)
+      cut to `speed_pause_keep_ms` (120) before it is sped up
+      (`_tighten_segment`). The opening silence is kept, so the start
+      stays put.
+    - Regenerate tab: the first speed-up of a clip launches
+      `--tighten-pauses` (`--text-file`: `OUT: <dir>` + `T: <guid>|<offs>|
+      <len>|<wav>`). The engine answers `T: <guid>|<new len>|<cut ms>|<new
+      wav>`, and the manifest is `{status, error, pause_txt, pause_count}`.
+      The panel swaps the take in at the same speed in one undo step, and
+      flags the item `P_EXT:fastsyncs_tight`; a regenerated take clears it.
+      This is local audio only.
+    - `engine_settings` `speed_tighten: 0` turns it off.
+    - Also fixed: the panel's manifest reader now keeps `fit_txt`, so
+      "Write a line for each chunk" no longer reads an empty answer.
+
 30. **v0.28.0: sync feedback loops.**
     - **Self-correcting run (anchor sync, `_sync_loop`):** after the first
       place + check, the pieces still off (Un sync, start drift, end drift)
