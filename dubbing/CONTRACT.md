@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+32. **v0.28.3: translator rules restored to v0.25.1.**
+    - v0.26.0 shipped an "English order" rewrite of `_PRINCIPLES`: rule 8,
+      no "flow over literalism", and "each stretch carries THAT cue's
+      words". The same change went into `ai_rules/_common.md`.
+    - It forced Marathi into English word order, and a live run's critic
+      called the result "too literal". Both files are back to the v0.25.1
+      text.
+    - `fit_to_seconds` now sizes a shortened line at
+      `min(measured speed, 11 chars/s)`, so it keeps room to spare.
+
 31. **v0.28.2: Speed up also shortens pauses** (the words never change).
     - Review screen: a paragraph with a reviewer speed > 1 has its long
       silences (inside the line and at its end, > `speed_pause_min_ms` 250)
