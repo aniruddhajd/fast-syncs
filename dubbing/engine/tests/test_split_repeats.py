@@ -54,5 +54,39 @@ class Split(unittest.TestCase):
         self.assertFalse(de._repeated_sentences(f"{A} {C}"))
 
 
+class FinalWindows(unittest.TestCase):
+    """v0.28.5: a script reused from a learned final dub is placed where the
+    user left its clips (not paired to the English by length)."""
+
+    def setUp(self):
+        import types
+        self.pl = types.SimpleNamespace(
+            AI_LEARNING_DIR=tempfile.mkdtemp(dir=_TMP),
+            _lang_key=lambda l: l.lower(),
+            _split_translation_paragraphs=lambda t: [
+                p.strip() for p in t.split("\n\n") if p.strip()],
+            _extract_srt_entries=lambda s: [(0.0, 2.0, "When you say."),
+                                            (60.5, 62.0, "Curse."),
+                                            (62.2, 64.0, "Not outside.")])
+
+    def test_saved_positions_become_exact_rows(self):
+        chunks = [(60.0, 2.0, A), (62.1, 2.0, C)]
+        doc = f"{A}\n\n{C}"
+        req = "P: 1|60.000|2.000|60.000\nP: 2|62.100|2.000|60.000\n"
+        de._save_final_windows(self.pl, "Marathi", doc, chunks, req)
+        rows = de._final_window_rows(self.pl, "Marathi", "srt", doc)
+        self.assertEqual(len(rows), 2)
+        # the region offset (60 s) is taken back out
+        self.assertEqual((rows[0]["start"], rows[0]["end"]), (0.0, 2.0))
+        self.assertEqual(rows[0]["cues"], [1])
+        self.assertEqual(rows[1]["tr"], C)
+
+    def test_changed_script_falls_back(self):
+        de._save_final_windows(self.pl, "Marathi", f"{A}\n\n{C}",
+                               [(0.0, 2.0, A), (2.0, 2.0, C)], "")
+        self.assertIsNone(de._final_window_rows(self.pl, "Marathi", "srt",
+                                                f"{A}\n\n{B}"))
+
+
 if __name__ == "__main__":
     unittest.main()

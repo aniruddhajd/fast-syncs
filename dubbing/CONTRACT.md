@@ -168,6 +168,19 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+34. **v0.28.5: a reused final script is placed where the user left it.**
+    - `--learn-final` also saves where each final clip sits, in the
+      English audio's time (the region offset from the `P:` lines is taken
+      back out). File:
+      `<AI_LEARNING_DIR>/final_windows/<lang>/<sha1 of the script's
+      letters>.json` = `[{s, e, t}]`.
+    - A run that reuses that script from memory gets one row per paragraph
+      at those windows, with the English cues under them
+      (`_final_window_rows`, exact anchor hints), instead of
+      `_memory_rows`' length pairing.
+    - It falls back to `_memory_rows` when the file is missing or the
+      paragraphs no longer match.
+
 33. **v0.28.4: split clips never put a sentence in twice.** A clip split
     or copied in REAPER keeps its whole text on every half.
     - `--learn-final` merges neighbouring clips whose text is the same as,

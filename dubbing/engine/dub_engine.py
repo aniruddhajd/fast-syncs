@@ -1259,11 +1259,19 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
             # v0.18: a memory hit still gets timed rows, so anchor sync (and
             # 1:1 review pairing) work on a re-run of an already-learned
             # script instead of falling back to the prompt sync.
-            m_rows, m_exact = _memory_rows(pl, language, ai_srt, tm_cached)
+            m_rows = _final_window_rows(pl, language, ai_srt, tm_cached)
             if m_rows:
-                _note("AI mode: memory paragraphs paired "
-                      + ("by their original English (exact)." if m_exact else
-                         "by length, snapped to English sentence ends."))
+                _note("AI mode: memory paragraphs placed where you left them "
+                      "on the final timeline (Learn from final dub).")
+            else:
+                m_rows, m_exact = _memory_rows(pl, language, ai_srt,
+                                               tm_cached)
+                if m_rows:
+                    _note("AI mode: memory paragraphs paired "
+                          + ("by their original English (exact)." if m_exact
+                             else "by length, snapped to English sentence "
+                                  "ends."))
+            if m_rows:
                 ctx["ai_rows"] = m_rows
                 prs = m_rows
                 punc_result = tr_result = rev_result = "\n\n".join(
@@ -1730,6 +1738,72 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
         status_cb=lambda m: _say("S3e", m), extend_last=False)
     manifest["synced_wav"] = synced_path
     _say("S3e", f"Synced audio saved: {os.path.basename(synced_path)}")
+
+
+def _final_windows_path(pl, language, doc):
+    """v0.28.5: where the clip positions of a learned final dub live, keyed
+    by the script's letters (so whitespace or line breaks never miss)."""
+    import hashlib
+    key = "".join(ch for ch in (doc or "").lower() if ch.isalnum())
+    return os.path.join(pl.AI_LEARNING_DIR, "final_windows",
+                        pl._lang_key(language),
+                        hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+                        + ".json")
+
+
+def _save_final_windows(pl, language, final_text, chunks, request_text):
+    """v0.28.5 Learn from final dub: remember WHERE each clip of the final
+    timeline sits (in the English audio's own time — the region offset the
+    importer added is taken back out), so a re-run that reuses this script
+    from memory places every paragraph where the user left it instead of
+    guessing its English by length. Fail-open."""
+    try:
+        offs = [p[3] for p in _parse_learn_pieces(request_text)]
+        off = max(set(offs), key=offs.count) if offs else 0.0
+        rows = [{"s": round(s - off, 3), "e": round(s - off + n, 3), "t": t}
+                for (s, n, t) in chunks]
+        path = _final_windows_path(pl, language, final_text)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _write_text(path, json.dumps(rows, ensure_ascii=False, indent=2))
+        _note(f"AI learning: the positions of {len(rows)} clip(s) were saved "
+              "— a re-run of this audio places its lines there.")
+    except Exception as e:                               # noqa: BLE001
+        _note(f"WARNING: clip positions not saved ({e}).")
+
+
+def _final_window_rows(pl, language, final_srt, doc):
+    """v0.28.5: timed rows for a script reused from a learned FINAL dub —
+    each paragraph at its clip's saved position, with the English cues
+    under it (so anchor sync gets exact windows). None when there are no
+    saved positions or they no longer match the script paragraph for
+    paragraph (then _memory_rows pairs as before)."""
+    try:
+        path = _final_windows_path(pl, language, doc)
+        if not os.path.isfile(path):
+            return None
+        wins = json.loads(_read_text(path)) or []
+        paras = pl._split_translation_paragraphs(doc)
+        if not wins or len(wins) != len(paras):
+            return None
+
+        def nk(s):
+            return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+        if any(nk(w.get("t")) != nk(p) for w, p in zip(wins, paras)):
+            return None
+        en = pl._extract_srt_entries(final_srt) if final_srt else []
+        rows = []
+        for w, p in zip(wins, paras):
+            s0, s1 = float(w["s"]), float(w["e"])
+            cues = [k + 1 for k, (a, b, _t) in enumerate(en)
+                    if s0 - 0.3 <= (a + b) / 2.0 <= s1 + 0.3]
+            row = {"en": " ".join(en[k - 1][2] for k in cues), "tr": p,
+                   "start": s0, "end": max(s0, s1)}
+            if cues:
+                row["cues"] = cues
+            rows.append(row)
+        return rows
+    except Exception:                                    # noqa: BLE001
+        return None
 
 
 def _memory_rows(pl, language, final_srt, doc):
@@ -4621,6 +4695,9 @@ def _run_learn_final(args, manifest):
                               pl.GEMINI_DEFAULT_MODEL,
                               source=os.path.basename(base) + " (final)",
                               status_cb=_note)
+    if covers:
+        _save_final_windows(pl, args.language, final_text, chunks,
+                            _read_text(in_path))
     held = res.get("held_back") or []
     nothing = not pairs and not corrections
     if res.get("ok") or nothing:
