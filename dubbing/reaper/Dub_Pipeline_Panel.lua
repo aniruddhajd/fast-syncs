@@ -9016,7 +9016,8 @@ function V5.clear_memory_chips(ctx)
   local busy = V5.busy()
   local lang = (_regen_lang ~= '' and _regen_lang) or LANGUAGE or ''
   local have_run = _regen_out_dir ~= "" and V5.run_base() ~= nil
-  reaper.ImGui_SameLine(ctx, 0, 6)
+  -- v0.28.7: own row (on the Learn row they ran off a narrow panel's edge)
+  reaper.ImGui_Dummy(ctx, 0, 2)
   _ui_begin_disabled(ctx, busy or not have_run)
   if V5.chip(ctx, (V5.quiet_job == "clearmem" and '… Clearing' or
                    'Forget this audio') .. '##clearaudio',
@@ -9033,9 +9034,15 @@ function V5.clear_memory_chips(ctx)
     end
   end
   _ui_end_disabled(ctx)
-  reaper.ImGui_SameLine(ctx, 0, 6)
+  -- beside it only when it fits; otherwise on the next line
+  local all_label = 'Clear all ' .. lang .. ' memory'
+  local avail = reaper.ImGui_GetContentRegionAvail(ctx)
+  if type(avail) == 'number' and avail > V5.chip_w(ctx, 'Forget this audio')
+       + V5.chip_w(ctx, all_label) + 18 then
+    reaper.ImGui_SameLine(ctx, 0, 6)
+  end
   _ui_begin_disabled(ctx, busy or lang == '')
-  if V5.chip(ctx, 'Clear all ' .. lang .. ' memory##clearall',
+  if V5.chip(ctx, all_label .. '##clearall',
              'Wipe EVERYTHING AI mode learned for ' .. lang .. ': style, ' ..
              'word choices, corrections, translation memory, timing and ' ..
              'speaking speed. A backup is made first (dubbing/data/' ..
