@@ -313,6 +313,8 @@ ASSIST_MANIFEST_KEYS = ["status", "error", "assist_txt"]
 RECO_MANIFEST_KEYS = ["status", "error", "reco_txt"]
 # v0.21 --learn-final: learn from the final dub (Regenerate tab button)
 LEARNF_MANIFEST_KEYS = ["status", "error", "learn_txt"]
+# v0.29.3 --clear-memory (Regenerate tab "Clear AI memory")
+CLEARMEM_MANIFEST_KEYS = ["status", "error", "clear_summary", "clear_backup"]
 VOICES_MANIFEST_KEYS = ["status", "error", "voices"]
 VOICE_CHANGE_MANIFEST_KEYS = ["status", "error", "vc_wav"]
 
@@ -444,6 +446,13 @@ def _parse_args():
                          "for one line. --text-file (UTF-8): LANG:/CURRENT:/"
                          "SPEAKER:/TR:/EN: lines and 'V: <id>|<name>' lines; "
                          "writes <text-file>.out ('PICK: <id>|<why>').")
+    ap.add_argument("--clear-memory", dest="clear_memory",
+                    action="store_true",
+                    help="v0.29.3: wipe everything AI mode learned for "
+                         "--language (style profile, translation memory, "
+                         "timing files of later versions) after copying it "
+                         "to data/ai_learning/backup-<time>/. Local files "
+                         "only — no API calls.")
     ap.add_argument("--learn-final", dest="learn_final",
                     action="store_true",
                     help="v0.21 AI mode: learn from the FINAL dub (the "
@@ -477,6 +486,10 @@ def _parse_args():
     args = ap.parse_args()
 
     if args.selfcheck:
+        return args
+    if args.clear_memory:
+        if not args.language:
+            ap.error("--clear-memory requires --language")
         return args
     if args.review_assist or args.recommend_voice or args.learn_final:
         if not args.language or not args.text_file:
@@ -3952,6 +3965,56 @@ def _learn_key(*parts):
                         .encode("utf-8")).hexdigest()[:20]
 
 
+def _run_clear_memory(args, manifest):
+    """--clear-memory (v0.29.3): wipe everything AI mode learned for one
+    language — the style profile (tone, grammar notes, word choices,
+    corrections), its translation memory (line pairs + saved scripts), and
+    the timing / clip-position files later versions wrote — after copying
+    it all to <data>/ai_learning/backup-<time>/. Other languages stay."""
+    import shutil
+    manifest["clear_summary"] = ""
+    manifest["clear_backup"] = ""
+    pl = _import_pipeline()
+    tm = pl.translation_memory
+    lang = pl._tm_lang(args.language)
+    key = pl._lang_key(args.language)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    learn_dir = pl.AI_LEARNING_DIR
+    bdir = os.path.join(learn_dir, f"backup-{stamp}")
+    os.makedirs(bdir, exist_ok=True)
+    prof = pl.profile_path(args.language)
+    sync_prof = os.path.join(learn_dir, "sync", key + ".json")
+    windows = os.path.join(learn_dir, "final_windows", key)
+    if os.path.isfile(prof):
+        shutil.copy2(prof, os.path.join(bdir, key + ".json"))
+    if os.path.isfile(sync_prof):
+        shutil.copy2(sync_prof, os.path.join(bdir, "sync_" + key + ".json"))
+    if os.path.isdir(windows):
+        shutil.copytree(windows, os.path.join(bdir, "final_windows_" + key))
+    n_pairs = n_docs = 0
+    if tm is not None and os.path.isfile(tm.DB_PATH):
+        shutil.copy2(tm.DB_PATH, os.path.join(bdir, "translation_memory.db"))
+        conn = tm._get_conn()
+        n_pairs = conn.execute("SELECT COUNT(*) FROM pairs WHERE "
+                               "language = ?", (lang,)).fetchone()[0]
+        n_docs = conn.execute("SELECT COUNT(*) FROM full_docs WHERE "
+                              "language = ?", (lang,)).fetchone()[0]
+        conn.execute("DELETE FROM pairs WHERE language = ?", (lang,))
+        conn.execute("DELETE FROM full_docs WHERE language = ?", (lang,))
+        conn.commit()
+    for f in (prof, sync_prof):
+        if os.path.isfile(f):
+            os.remove(f)
+    if os.path.isdir(windows):
+        shutil.rmtree(windows, ignore_errors=True)
+    summary = (f"Cleared all {args.language} AI memory: {n_pairs} line "
+               f"pair(s), {n_docs} saved script(s), the learned style and "
+               "timing.")
+    manifest["clear_summary"] = summary
+    manifest["clear_backup"] = bdir
+    _note(summary + f" Backup: {bdir}")
+
+
 def _run_learn_final(args, manifest):
     """--learn-final: learn from the final dub (see the block comment)."""
     import hashlib
@@ -4108,7 +4171,10 @@ def main() -> int:
     if args.selfcheck:
         return _selfcheck(args)
 
-    if args.learn_final:
+    if args.clear_memory:
+        keys, runner, ok_status = (CLEARMEM_MANIFEST_KEYS, _run_clear_memory,
+                                   "ok")
+    elif args.learn_final:
         keys, runner, ok_status = LEARNF_MANIFEST_KEYS, _run_learn_final, "ok"
     elif args.recommend_voice:
         keys, runner, ok_status = RECO_MANIFEST_KEYS, _run_recommend_voice, "ok"

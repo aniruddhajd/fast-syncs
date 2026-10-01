@@ -407,6 +407,10 @@ def _parse_args(argv):
                     action="store_true",
                     help="v0.19: recommend voices for one line (request in "
                          "--text-file). Forwarded to dub_engine.py.")
+    ap.add_argument("--clear-memory", dest="clear_memory",
+                    action="store_true",
+                    help="v0.29.3: wipe the AI memory of --language (backed "
+                         "up first). Forwarded to dub_engine.py.")
     ap.add_argument("--learn-final", dest="learn_final",
                     action="store_true",
                     help="v0.21: AI mode learns from the final dub (the "
@@ -431,7 +435,10 @@ def _parse_args(argv):
 
     # Mirror dub_engine.py's mode validation here so a bad launch dies with
     # a clear argparse message instead of deep inside the detached child.
-    if args.review_assist or args.recommend_voice or args.learn_final:
+    if args.clear_memory:
+        if not args.language:
+            ap.error("--clear-memory requires --language")
+    elif args.review_assist or args.recommend_voice or args.learn_final:
         if not args.language or not args.text_file:
             ap.error("--review-assist/--recommend-voice/--learn-final "
                      "require --language and --text-file")
@@ -558,7 +565,9 @@ def main(argv=None) -> int:
             log_file.write("[run_dub] note: --app-dir is deprecated (v0.3) "
                            "and ignored by the standalone engine.\n")
             cmd += ["--app-dir", args.app_dir]
-        if args.learn_final:
+        if args.clear_memory:
+            cmd += ["--clear-memory"]
+        elif args.learn_final:
             cmd += ["--learn-final", "--text-file", args.text_file]
         elif args.recommend_voice:
             cmd += ["--recommend-voice", "--text-file", args.text_file]

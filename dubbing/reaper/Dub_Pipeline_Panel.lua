@@ -1651,6 +1651,7 @@ function V5.quiet_label()
   if V5.quiet_job == "assist" then return "The assistant is answering" end
   if V5.quiet_job == "reco" then return "Recommending voices" end
   if V5.quiet_job == "learnf" then return "Learning from the final dub" end
+  if V5.quiet_job == "clearmem" then return "Clearing the AI memory" end
   return "Still fetching the ElevenLabs voices"
 end
 
@@ -3079,6 +3080,8 @@ local MANIFEST_KEYS = {
   "reco_txt",
   -- v0.21: --learn-final manifest (Learn from final dub summary file).
   "learn_txt",
+  -- v0.29.3: --clear-memory manifest (Clear AI memory button).
+  "clear_summary", "clear_backup",
   -- v0.13: pause-aware plan manifest ("status":"plan"). The counts are
   -- strings like every other numeric field here — json_field returns
   -- numbers as text and every consumer tonumber()s what it needs.
@@ -3712,6 +3715,10 @@ local function build_engine_cmd(py, opts)
   -- v0.21 learn from the final dub (request in opts.text_file).
   if opts.learn_final then
     parts[#parts + 1] = '--learn-final'
+  end
+  -- v0.29.3 Clear AI memory (language travels in opts.language).
+  if opts.clear_memory then
+    parts[#parts + 1] = '--clear-memory'
   end
   if opts.voice_change then
     parts[#parts + 1] = '--voice-change'
@@ -7404,6 +7411,21 @@ local function _finish_run(exit_code)
   end
 
   -- v0.21 learn from the final dub — quiet: the summary lands in a banner.
+  -- v0.29.3 Clear AI memory — quiet: the summary lands in a banner.
+  if _run_mode == "clearmem" then
+    if cancelled then
+      ui_set_banner("warn", "Clearing the AI memory was cancelled.")
+    elseif m and m.status == "ok" and exit_code == 0 then
+      ui_set_banner("info", (m.clear_summary or "AI memory cleared.") ..
+        ((m.clear_backup or '') ~= '' and ("\nBackup: " .. m.clear_backup)
+         or ''))
+    else
+      ui_set_banner("error", "Clearing the AI memory failed:\n" ..
+                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
+    end
+    return
+  end
+
   if _run_mode == "learnf" then
     if cancelled then
       ui_set_banner("warn", "Learning from the final dub cancelled.")
@@ -8440,6 +8462,47 @@ function V5.learn_final_chip(ctx)
              'Press it when the dub is final; pressing again learns only ' ..
              'what changed.') and can then
     V5.learn_final_request()
+  end
+  _ui_end_disabled(ctx)
+  V5.clear_memory_chip(ctx)
+end
+
+-- v0.29.3: ONE button that wipes everything AI mode learned for the
+-- language (style, word choices, corrections, translation memory, saved
+-- scripts, timing), backed up first to dubbing/data/ai_learning/backup-*.
+-- Asks twice. Local files only, no credits.
+function V5.clear_memory_chip(ctx)
+  local busy = V5.busy()
+  local lang = (_regen_lang ~= '' and _regen_lang) or LANGUAGE or ''
+  reaper.ImGui_Dummy(ctx, 0, 2)
+  _ui_begin_disabled(ctx, busy or lang == '')
+  if V5.chip(ctx, (V5.quiet_job == "clearmem" and '… Clearing' or
+                   'Clear AI memory (' .. lang .. ')') .. '##clearmem',
+             'Wipe everything AI mode learned for ' .. lang .. ': style, ' ..
+             'word choices, corrections, translation memory and saved ' ..
+             'scripts. Use it when dubs come out with repeated sentences or ' ..
+             'reused wrong scripts. A backup is made first.', true)
+     and not busy and lang ~= '' then
+    if reaper.ShowMessageBox(
+         "Clear ALL " .. lang .. " AI memory?\n\n" ..
+         "AI mode forgets every style rule, word choice, correction and " ..
+         "saved script it learned for " .. lang .. ", and starts from " ..
+         "zero. Other languages are not touched.\n\nA backup copy is kept " ..
+         "in dubbing/data/ai_learning/backup-<date_time>.",
+         "Clear AI memory (1 of 2)", 4) == 6
+       and reaper.ShowMessageBox(
+         "Are you sure?\n\nYes = clear everything     No = cancel",
+         "Clear AI memory (2 of 2)", 4) == 6 then
+      local py = preflight_engine(false)
+      if py then
+        local cmd = build_engine_cmd(py, { clear_memory = true,
+                                           language = lang })
+        launch_engine(cmd, "clearmem", {
+          "[panel] Python : " .. py,
+          "[panel] Mode   : clear the " .. lang .. " AI memory",
+        }, true)
+      end
+    end
   end
   _ui_end_disabled(ctx)
 end
