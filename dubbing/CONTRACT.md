@@ -168,6 +168,21 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+35. **v0.28.6: Clear memory** (Regenerate tab, next to "Learn from final
+    dub").
+    - `--clear-memory --language L --text-file F`. `F` holds
+      `SCOPE: audio|language` and `BASE: <run base>`.
+    - **audio** deletes the `full_docs` row(s) whose `en_hash` matches the
+      run's English, plus their `final_windows` file and the run's learned
+      markers. Line pairs, style and timing stay.
+    - **language** first copies the profile, the sync profile,
+      `final_windows/<lang>/` and the DB to `ai_learning/backup-<time>/`,
+      then deletes `pairs` and `full_docs` for L and both profiles.
+    - The answer `<F>.out` holds `CLEARED:` / `BACKUP:` lines, and the
+      manifest is `{status, error, clear_txt}`.
+    - The panel asks once for "Forget this audio" and twice for "Clear
+      all <lang> memory".
+
 34. **v0.28.5: a reused final script is placed where the user left it.**
     - `--learn-final` also saves where each final clip sits, in the
       English audio's time (the region offset from the `P:` lines is taken

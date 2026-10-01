@@ -322,6 +322,8 @@ ASSIST_MANIFEST_KEYS = ["status", "error", "assist_txt"]
 RECO_MANIFEST_KEYS = ["status", "error", "reco_txt"]
 # v0.21 --learn-final: learn from the final dub (Regenerate tab button)
 LEARNF_MANIFEST_KEYS = ["status", "error", "learn_txt"]
+# v0.28.6 --clear-memory (Regenerate tab "Forget this audio" / "Clear all")
+CLEARMEM_MANIFEST_KEYS = ["status", "error", "clear_txt"]
 VOICES_MANIFEST_KEYS = ["status", "error", "voices"]
 VOICE_CHANGE_MANIFEST_KEYS = ["status", "error", "vc_wav"]
 
@@ -454,6 +456,15 @@ def _parse_args():
                          "'@@ <k> <len_s>' + 'EN: ...' / 'CUR: ...' per "
                          "chunk; writes <text-file>.out ('@@ <k>' then the "
                          "line). Text-only LLM call, no audio, no TTS.")
+    ap.add_argument("--clear-memory", dest="clear_memory",
+                    action="store_true",
+                    help="v0.28.6: clear AI memory. --text-file (UTF-8): "
+                         "'SCOPE: audio' + 'BASE: <run base>' forgets the "
+                         "saved script and clip positions of that audio; "
+                         "'SCOPE: language' wipes everything learned for "
+                         "--language (backed up first). Writes "
+                         "<text-file>.out (CLEARED:/BACKUP: lines). Local "
+                         "files only — no API calls.")
     ap.add_argument("--tighten-pauses", dest="tighten_pauses",
                     action="store_true",
                     help="v0.28.2 regen tab Speed up: shorten the long "
@@ -506,6 +517,10 @@ def _parse_args():
     if args.tighten_pauses:
         if not args.text_file:
             ap.error("--tighten-pauses requires --text-file")
+        return args
+    if args.clear_memory:
+        if not args.language or not args.text_file:
+            ap.error("--clear-memory requires --language and --text-file")
         return args
     if args.review_assist or args.recommend_voice or args.learn_final \
        or args.fit_chunks:
@@ -1738,6 +1753,111 @@ def _stage_dub_match(pl, args, api_key, manifest, ctx, voice_id):
         status_cb=lambda m: _say("S3e", m), extend_last=False)
     manifest["synced_wav"] = synced_path
     _say("S3e", f"Synced audio saved: {os.path.basename(synced_path)}")
+
+
+def _run_clear_memory(args, manifest):
+    """--clear-memory (v0.28.6).
+      audio:    forget the saved full script of ONE audio (the next run
+                translates it afresh) + its saved clip positions + the run's
+                learned markers (so Learn works again on it). Line pairs,
+                style and timing learned from it stay.
+      language: wipe everything AI mode learned for the language — style
+                profile, translation memory (pairs + scripts), timing and
+                speaking speed, clip positions — after copying it all to
+                <data>/ai_learning/backup-<time>/.
+    No API calls."""
+    import shutil
+    manifest["clear_txt"] = ""
+    in_path = os.path.abspath(os.path.expanduser(args.text_file))
+    if not os.path.isfile(in_path):
+        raise RuntimeError(f"--text-file not found: {in_path}")
+    scope, base = "", ""
+    for line in _read_text(in_path).lstrip("\ufeff").splitlines():
+        line = line.strip()
+        if line.startswith("SCOPE:"):
+            scope = line[6:].strip().lower()
+        elif line.startswith("BASE:"):
+            base = line[5:].strip()
+    if scope not in ("audio", "language"):
+        raise RuntimeError("The clear request names no scope.")
+    pl = _import_pipeline()
+    tm = pl.translation_memory
+    if tm is None:
+        raise RuntimeError("The translation memory is not available.")
+    lang = pl._tm_lang(args.language)
+    conn = tm._get_conn()
+    out = []
+
+    def drop_markers(b):
+        for suf in (LEARN_FINAL_SUFFIX, SYNC_LEARNED_SUFFIX,
+                    "_ai_learned.json"):
+            try:
+                if b and os.path.isfile(b + suf):
+                    os.remove(b + suf)
+            except Exception:
+                pass
+
+    if scope == "audio":
+        en_entries, _en_name = _load_final_english(pl, base)
+        src = pl._tm_source_text(en_entries) if en_entries else ""
+        if not src:
+            raise RuntimeError("No English transcript found for this run — "
+                               "nothing to match its memory by.")
+        h = tm.source_hash(src)
+        docs = [r[0] for r in conn.execute(
+            "SELECT doc_text FROM full_docs WHERE language = ? AND "
+            "en_hash = ?", (lang, h))]
+        conn.execute("DELETE FROM full_docs WHERE language = ? AND "
+                     "en_hash = ?", (lang, h))
+        conn.commit()
+        n_pos = 0
+        for d in docs:
+            p = _final_windows_path(pl, args.language, d)
+            if os.path.isfile(p):
+                os.remove(p)
+                n_pos += 1
+        drop_markers(base)
+        out.append(f"CLEARED: {len(docs)} saved script(s) and {n_pos} set(s) "
+                   "of clip positions for this audio — the next run "
+                   "translates it fresh")
+        _note(out[-1].replace("CLEARED: ", "Memory: "))
+    else:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        bdir = os.path.join(pl.AI_LEARNING_DIR, f"backup-{stamp}")
+        os.makedirs(bdir, exist_ok=True)
+        key = pl._lang_key(args.language)
+        prof_file = pl.profile_path(args.language)
+        sync_file = pl.sync_profile_path(args.language)
+        if os.path.isfile(prof_file):
+            shutil.copy2(prof_file, os.path.join(bdir, key + ".json"))
+        if os.path.isfile(sync_file):
+            shutil.copy2(sync_file, os.path.join(bdir, "sync_" + key + ".json"))
+        fw = os.path.join(pl.AI_LEARNING_DIR, "final_windows", key)
+        if os.path.isdir(fw):
+            shutil.copytree(fw, os.path.join(bdir, "final_windows_" + key))
+        shutil.copy2(tm.DB_PATH, os.path.join(bdir, "translation_memory.db"))
+        n_pairs = conn.execute("SELECT COUNT(*) FROM pairs WHERE language = ?",
+                               (lang,)).fetchone()[0]
+        n_docs = conn.execute("SELECT COUNT(*) FROM full_docs WHERE "
+                              "language = ?", (lang,)).fetchone()[0]
+        conn.execute("DELETE FROM pairs WHERE language = ?", (lang,))
+        conn.execute("DELETE FROM full_docs WHERE language = ?", (lang,))
+        conn.commit()
+        for f in (prof_file, sync_file):
+            if os.path.isfile(f):
+                os.remove(f)
+        if os.path.isdir(fw):
+            shutil.rmtree(fw, ignore_errors=True)
+        drop_markers(base)
+        out.append(f"CLEARED: all {args.language} memory — {n_pairs} line "
+                   f"pair(s), {n_docs} saved script(s), the learned style, "
+                   "timing and speaking speed")
+        out.append(f"BACKUP: {bdir}")
+        _note(f"Memory: everything learned for {args.language} cleared; "
+              f"backup in {bdir}")
+    out_path = in_path + ".out"
+    _write_text(out_path, "\n".join(out) + "\n")
+    manifest["clear_txt"] = out_path
 
 
 def _final_windows_path(pl, language, doc):
@@ -4787,7 +4907,10 @@ def main() -> int:
     if args.selfcheck:
         return _selfcheck(args)
 
-    if args.tighten_pauses:
+    if args.clear_memory:
+        keys, runner, ok_status = (CLEARMEM_MANIFEST_KEYS, _run_clear_memory,
+                                   "ok")
+    elif args.tighten_pauses:
         keys, runner, ok_status = (PAUSE_MANIFEST_KEYS, _run_tighten_pauses,
                                    "ok")
     elif args.fit_chunks:

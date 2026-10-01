@@ -407,6 +407,11 @@ def _parse_args(argv):
                     action="store_true",
                     help="v0.19: recommend voices for one line (request in "
                          "--text-file). Forwarded to dub_engine.py.")
+    ap.add_argument("--clear-memory", dest="clear_memory",
+                    action="store_true",
+                    help="v0.28.6: clear AI memory for one audio or a whole "
+                         "language (request in --text-file). Forwarded to "
+                         "dub_engine.py.")
     ap.add_argument("--tighten-pauses", dest="tighten_pauses",
                     action="store_true",
                     help="v0.28.2: shorten the long pauses inside dub clips "
@@ -440,7 +445,10 @@ def _parse_args(argv):
 
     # Mirror dub_engine.py's mode validation here so a bad launch dies with
     # a clear argparse message instead of deep inside the detached child.
-    if args.tighten_pauses:
+    if args.clear_memory:
+        if not args.language or not args.text_file:
+            ap.error("--clear-memory requires --language and --text-file")
+    elif args.tighten_pauses:
         if not args.text_file:
             ap.error("--tighten-pauses requires --text-file")
     elif args.review_assist or args.recommend_voice or args.learn_final \
@@ -571,7 +579,9 @@ def main(argv=None) -> int:
             log_file.write("[run_dub] note: --app-dir is deprecated (v0.3) "
                            "and ignored by the standalone engine.\n")
             cmd += ["--app-dir", args.app_dir]
-        if args.tighten_pauses:
+        if args.clear_memory:
+            cmd += ["--clear-memory", "--text-file", args.text_file]
+        elif args.tighten_pauses:
             cmd += ["--tighten-pauses", "--text-file", args.text_file]
         elif args.fit_chunks:
             cmd += ["--fit-chunks", "--text-file", args.text_file]

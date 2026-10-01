@@ -1661,6 +1661,7 @@ function V5.quiet_label()
   if V5.quiet_job == "learnf" then return "Learning from the final dub" end
   if V5.quiet_job == "fitchunks" then return "Writing a line for each chunk" end
   if V5.quiet_job == "tighten" then return "Shortening the pauses" end
+  if V5.quiet_job == "clearmem" then return "Clearing memory" end
   return "Still fetching the ElevenLabs voices"
 end
 
@@ -3091,6 +3092,8 @@ local MANIFEST_KEYS = {
   "learn_txt",
   -- v0.32 --fit-chunks and v0.28.2 --tighten-pauses answer files.
   "fit_txt", "fit_count", "pause_txt", "pause_count",
+  -- v0.28.6 --clear-memory answer file.
+  "clear_txt",
   -- v0.13: pause-aware plan manifest ("status":"plan"). The counts are
   -- strings like every other numeric field here — json_field returns
   -- numbers as text and every consumer tonumber()s what it needs.
@@ -3754,6 +3757,10 @@ local function build_engine_cmd(py, opts)
   -- v0.28.2 regen tab Speed up: shorten the clips' long pauses.
   if opts.tighten_pauses then
     parts[#parts + 1] = '--tighten-pauses'
+  end
+  -- v0.28.6 Forget this audio / Clear all memory (request in text_file).
+  if opts.clear_memory then
+    parts[#parts + 1] = '--clear-memory'
   end
   if opts.voice_change then
     parts[#parts + 1] = '--voice-change'
@@ -7507,6 +7514,26 @@ local function _finish_run(exit_code)
 
   -- v0.32 "Write a line for each chunk" — quiet: the lines land in the
   -- Regenerate tab for review; nothing is voiced yet.
+  -- v0.28.6 Forget this audio / Clear all memory.
+  if _run_mode == "clearmem" then
+    if cancelled then
+      ui_set_banner("warn", "Clearing memory was cancelled.")
+    elseif m and m.status == "ok" and exit_code == 0 then
+      local msg = {}
+      for line in ((read_all(m.clear_txt) or '') .. '\n'):gmatch('([^\n]*)\n') do
+        local k, v = line:gsub('\r$', ''):match('^(%u+):%s*(.*)$')
+        if k == 'CLEARED' then msg[#msg + 1] = 'Cleared ' .. v .. '.' end
+        if k == 'BACKUP' then msg[#msg + 1] = 'Backup: ' .. v end
+      end
+      ui_set_banner("info", #msg > 0 and table.concat(msg, '\n')
+                            or "Memory cleared.")
+    else
+      ui_set_banner("error", "Clearing memory failed:\n" ..
+                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
+    end
+    return
+  end
+
   -- v0.28.2 Speed up: swap in the takes with shortened pauses.
   if _run_mode == "tighten" then
     local asked = V5.tighten_guids or {}
@@ -8979,6 +9006,80 @@ function V5.learn_final_chip(ctx)
     end
   end
   _ui_end_disabled(ctx)
+  V5.clear_memory_chips(ctx)
+end
+
+-- v0.28.6: "Forget this audio" (its saved script + clip positions, so the
+-- next run translates it fresh) and "Clear all memory" (everything learned
+-- for the language, backed up first). Local files only, no credits.
+function V5.clear_memory_chips(ctx)
+  local busy = V5.busy()
+  local lang = (_regen_lang ~= '' and _regen_lang) or LANGUAGE or ''
+  local have_run = _regen_out_dir ~= "" and V5.run_base() ~= nil
+  reaper.ImGui_SameLine(ctx, 0, 6)
+  _ui_begin_disabled(ctx, busy or not have_run)
+  if V5.chip(ctx, (V5.quiet_job == "clearmem" and '… Clearing' or
+                   'Forget this audio') .. '##clearaudio',
+             'Forget the script AI mode saved for THIS audio (and where its ' ..
+             'clips sat), so the next run translates it fresh instead of ' ..
+             'reusing it. Everything learned from other talks stays.')
+     and not busy and have_run then
+    if reaper.ShowMessageBox(
+         "Forget the saved script for this audio?\n\n" ..
+         "The next run of this audio will translate it fresh. Words, style " ..
+         "and timing learned from it and from other talks stay.",
+         "Forget this audio", 4) == 6 then
+      V5.clear_memory_request('audio', lang)
+    end
+  end
+  _ui_end_disabled(ctx)
+  reaper.ImGui_SameLine(ctx, 0, 6)
+  _ui_begin_disabled(ctx, busy or lang == '')
+  if V5.chip(ctx, 'Clear all ' .. lang .. ' memory##clearall',
+             'Wipe EVERYTHING AI mode learned for ' .. lang .. ': style, ' ..
+             'word choices, corrections, translation memory, timing and ' ..
+             'speaking speed. A backup is made first (dubbing/data/' ..
+             'ai_learning/backup-<time>).', true) and not busy
+     and lang ~= '' then
+    if reaper.ShowMessageBox(
+         "Clear ALL " .. lang .. " memory?\n\n" ..
+         "AI mode forgets every style rule, word choice, correction, saved " ..
+         "script and timing it learned for " .. lang .. ", and starts " ..
+         "from zero.\n\nA backup copy is kept.",
+         "Clear all memory (1 of 2)", 4) == 6
+       and reaper.ShowMessageBox(
+         "Are you sure?\n\nThis cannot be undone from the panel (only by " ..
+         "restoring the backup by hand).\n\n" ..
+         "Yes = clear everything     No = cancel",
+         "Clear all memory (2 of 2)", 4) == 6 then
+      V5.clear_memory_request('language', lang)
+    end
+  end
+  _ui_end_disabled(ctx)
+end
+
+function V5.clear_memory_request(scope, lang)
+  ui_clear_banner()
+  local dir = (_regen_out_dir ~= '' and _regen_out_dir) or STATUS_DIR
+  local lines = { 'SCOPE: ' .. scope }
+  local base = V5.run_base()
+  if base then lines[#lines + 1] = 'BASE: ' .. base end
+  local path = dir .. SEP .. '_clear_memory.txt'
+  local f = io.open(path, 'wb')
+  if not f then
+    ui_set_banner("error", "Could not write:\n" .. path)
+    return false
+  end
+  f:write(table.concat(lines, '\n') .. '\n')
+  f:close()
+  local py = preflight_engine(false)
+  if not py then return false end
+  local cmd = build_engine_cmd(py, { clear_memory = true, text_file = path,
+                                     language = lang })
+  return launch_engine(cmd, "clearmem", {
+    "[panel] Python : " .. py,
+    "[panel] Mode   : clear memory (" .. scope .. ", " .. lang .. ")",
+  }, true)
 end
 
 -- v0.32: several chunks selected — offer "Write a line for each chunk" (see
