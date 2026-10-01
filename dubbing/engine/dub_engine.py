@@ -1210,6 +1210,11 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
         try:
             en_entries_tm = pl._extract_srt_entries(final_srt)
             tm_cached = _tm_full(language, en_entries_tm)
+            if tm_cached and _repeated_sentences(tm_cached):
+                _note("Translation memory: the stored script for this audio "
+                      "repeats a sentence back to back (learned from split "
+                      "clips) — not reused; translating afresh.")
+                tm_cached = None
             if not tm_cached and callable(_tm_block):
                 tm_glossary = _tm_block(language, en_entries_tm) or ""
         except Exception as e:
@@ -4213,6 +4218,44 @@ REGEN_EDITS_SUFFIX = "_regen_edits.jsonl"
 LEARN_KEYS_MAX = 5000            # learned pair/correction keys remembered
 
 
+_SENT_SPLIT = re.compile(r"(?<=[।.!?;])\s+")
+
+
+def _sentences(text):
+    return [s.strip() for s in _SENT_SPLIT.split(" ".join((text or "").split()))
+            if len(s.strip()) > 15]
+
+
+def _repeated_sentences(text):
+    """v0.28.4: sentences that occur twice IN A ROW in *text* — the mark a
+    split clip leaves when its halves both carry the whole line (a speaker
+    who repeats himself does it with a sentence in between, or not word for
+    word, far more often than back to back)."""
+    s = _sentences(text)
+    return [a for a, b in zip(s, s[1:]) if a == b]
+
+
+def _merge_split_chunks(chunks):
+    """v0.28.4 learn-final: a clip split (S) or copied in REAPER keeps its
+    WHOLE text on every half, so the timeline holds the same line two or
+    three times side by side. Neighbouring clips whose text is the same,
+    or contained in the neighbour's, become one clip spanning both.
+    Returns (chunks, how many were merged)."""
+    out, merged = [], 0
+    for s, n, t in chunks:
+        if out:
+            ps, pn, pt = out[-1]
+            a = " ".join(pt.split())
+            b = " ".join(t.split())
+            if len(b) > 15 and (a == b or b in a or a in b):
+                end = max(ps + pn, s + n)
+                out[-1] = (ps, end - ps, pt if len(a) >= len(b) else t)
+                merged += 1
+                continue
+        out.append((s, n, t))
+    return out, merged
+
+
 def _parse_learn_request(text):
     """Request file -> (base, [(start_s, len_s, text)] in timeline order).
     'BASE: <abs run base path, no suffix>' and 'C: <start>|<len>|<text>'
@@ -4510,6 +4553,11 @@ def _run_learn_final(args, manifest):
     if not os.path.isfile(in_path):
         raise RuntimeError(f"--text-file not found: {in_path}")
     base, chunks = _parse_learn_request(_read_text(in_path))
+    chunks, n_split = _merge_split_chunks(chunks)
+    if n_split:
+        _note(f"AI learning: {n_split} clip(s) repeat their neighbour's text "
+              "(a clip split or copied in REAPER keeps its whole text) — "
+              "that text is learned once.")
     if not base or not os.path.isdir(os.path.dirname(base) or "."):
         raise RuntimeError("The learn request names no usable run folder "
                            f"(BASE: {base or '(missing)'}).")

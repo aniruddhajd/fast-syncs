@@ -168,6 +168,14 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+33. **v0.28.4: split clips never put a sentence in twice.** A clip split
+    or copied in REAPER keeps its whole text on every half.
+    - `--learn-final` merges neighbouring clips whose text is the same as,
+      or contained in, the neighbour's (`_merge_split_chunks`) before it
+      learns pairs or the full script.
+    - The full-script memory reuse skips a stored script that repeats a
+      sentence back to back (`_repeated_sentences`) and translates afresh.
+
 32. **v0.28.3: translator rules restored to v0.25.1.**
     - v0.26.0 shipped an "English order" rewrite of `_PRINCIPLES`: rule 8,
       no "flow over literalism", and "each stretch carries THAT cue's
