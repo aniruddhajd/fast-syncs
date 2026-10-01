@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+37. **v0.28.9: "Learn from track" drop-down.**
+    - It sits above "Learn from final dub". Entries are "Auto" (the
+      selected clip's track, else the newest), then one entry per "Dub
+      Chunks…" track with clips: `<track> · N clips + M unsync · <run
+      folder>`.
+    - Both importers stamp their tracks with `P_EXT:fastsyncs_run`
+      (out_dir) and `P_EXT:fastsyncs_lang`. Picking a stamped track also
+      sets the panel's run target (`V5.set_regen_target`).
+    - `V5.final_dub_rows` reads the picked track (`V5.learn_track_guid`).
+
 36. **v0.28.8: one "Un sync" track per import.**
     - Both importers used to reuse a single "Un sync" track while every
       import got a fresh "Dub Chunks <n>". The unsynced clips of two runs

@@ -3612,6 +3612,7 @@ local function import_to_timeline(m)
 
     if #synced_entries > 0 then
       local tr = append_named_track(TRACK_CHUNKS .. suffix)
+      V5.stamp_run_track(tr, m)
       for i, e in ipairs(synced_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
@@ -3635,6 +3636,7 @@ local function import_to_timeline(m)
       -- v0.28.8: its own track, numbered like this import's Dub Chunks
       -- (a shared "Un sync" track mixed the clips of two runs together)
       local tr = append_named_track(V5.TRACK_UNSYNC .. suffix)
+      V5.stamp_run_track(tr, m)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
@@ -8286,7 +8288,12 @@ function V5.final_dub_rows()
   end
 
   local src_tr = nil
-  local sel = reaper.CountSelectedMediaItems(0) > 0
+  -- v0.28.9: the track picked in the drop-down beside the Learn button
+  if (V5.learn_track_guid or '') ~= '' then
+    local tr = V5.track_by_guid(V5.learn_track_guid)
+    if tr and has_text(tr) then src_tr = tr end
+  end
+  local sel = (not src_tr) and reaper.CountSelectedMediaItems(0) > 0
               and reaper.GetSelectedMediaItem(0, 0) or nil
   if sel then
     local tr = reaper.GetMediaItem_Track(sel)
@@ -8988,7 +8995,96 @@ end
 -- v0.21: "Learn from final dub" — AI mode learns from the timeline as it is
 -- now (V5.learn_final_request). Shared by the Regenerate tab and the success
 -- screen; disabled while the engine is busy or no run folder is known.
+-- v0.28.9: tracks are stamped at import with the run they came from, so
+-- the Learn drop-down can name the run and switch the panel to it.
+V5.TRACK_RUN_KEY  = "P_EXT:fastsyncs_run"
+V5.TRACK_LANG_KEY = "P_EXT:fastsyncs_lang"
+
+function V5.stamp_run_track(tr, m)
+  if not tr or not m then return end
+  reaper.GetSetMediaTrackInfo_String(tr, V5.TRACK_RUN_KEY,
+                                     m.out_dir or "", true)
+  reaper.GetSetMediaTrackInfo_String(tr, V5.TRACK_LANG_KEY,
+                                     m.language or "", true)
+end
+
+function V5.track_by_guid(guid)
+  for t = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, t)
+    if reaper.GetTrackGUID(tr) == guid then return tr end
+  end
+  return nil
+end
+
+-- Every "Dub Chunks…" track with clips: { guid, label, run, lang }.
+function V5.learn_track_options()
+  local function clips(tr)
+    local n = 0
+    for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
+      if V5.get_item_text(reaper.GetTrackMediaItem(tr, i)) ~= "" then
+        n = n + 1
+      end
+    end
+    return n
+  end
+  local names, out = {}, {}
+  for t = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, t)
+    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+    names[nm] = tr
+  end
+  for t = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, t)
+    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+    if nm:sub(1, #TRACK_CHUNKS) == TRACK_CHUNKS then
+      local n = clips(tr)
+      if n > 0 then
+        local un = names[V5.TRACK_UNSYNC .. nm:sub(#TRACK_CHUNKS + 1)]
+        local nu = un and clips(un) or 0
+        local _, run = reaper.GetSetMediaTrackInfo_String(
+          tr, V5.TRACK_RUN_KEY, "", false)
+        local _, lang = reaper.GetSetMediaTrackInfo_String(
+          tr, V5.TRACK_LANG_KEY, "", false)
+        out[#out + 1] = {
+          guid = reaper.GetTrackGUID(tr), run = run or "", lang = lang or "",
+          label = string.format('%s · %d clip%s%s · %s', nm, n,
+                                n == 1 and '' or 's',
+                                nu > 0 and (' + ' .. nu .. ' unsync') or '',
+                                (run or '') ~= '' and basename(run)
+                                  or 'run not recorded') }
+      end
+    end
+  end
+  return out
+end
+
+function V5.learn_track_ui(ctx)
+  local tracks = V5.learn_track_options()
+  local opts = { { '', 'Auto — the selected clip\'s track, else the newest' } }
+  for _, t in ipairs(tracks) do opts[#opts + 1] = { t.guid, t.label } end
+  local cur = V5.learn_track_guid or ''
+  local found = cur == ''
+  for _, t in ipairs(tracks) do if t.guid == cur then found = true end end
+  if not found then cur = '' end
+  reaper.ImGui_Text(ctx, 'Learn from track')
+  V5.hint(ctx, 'Which dub "Learn from final dub" reads. Each import has its ' ..
+               'own "Dub Chunks" track and its own "Un sync" track; the ' ..
+               'folder name is the run it came from. Picking a track also ' ..
+               'switches the panel to that run.')
+  local pick = V5.dropdown(ctx, 'learntrack', cur, opts, 520)
+  if pick ~= cur then
+    V5.learn_track_guid = pick
+    for _, t in ipairs(tracks) do
+      if t.guid == pick and t.run ~= '' and t.run ~= _regen_out_dir then
+        V5.set_regen_target(t.run, t.lang ~= '' and t.lang or _regen_lang)
+        ui_set_banner("info", "Learn will read " .. t.label .. ".")
+      end
+    end
+  end
+end
+
 function V5.learn_final_chip(ctx)
+  V5.learn_track_ui(ctx)
   local busy = V5.busy()
   local test = V5.is_ptest_dir(_regen_out_dir)
   local can = _regen_out_dir ~= "" and not busy and not test

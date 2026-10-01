@@ -663,6 +663,11 @@ local function main()
 
     if #synced_entries > 0 then
       local tr = append_named_track(TRACK_CHUNKS .. suffix)
+      -- v0.28.9: the run this track came from (panel's Learn drop-down)
+      reaper.GetSetMediaTrackInfo_String(tr, "P_EXT:fastsyncs_run",
+                                         m.out_dir or "", true)
+      reaper.GetSetMediaTrackInfo_String(tr, "P_EXT:fastsyncs_lang",
+                                         m.language or "", true)
       for i, e in ipairs(synced_entries) do
         local it = add_file_item(tr, tts_wav, e.synced_start, e.dur,
                                  e.orig_start,
