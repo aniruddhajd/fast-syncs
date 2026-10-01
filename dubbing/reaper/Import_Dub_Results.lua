@@ -397,6 +397,7 @@ local function fresh_name_suffix(tag)
     local suffix = (n == 1) and "" or (" " .. n)
     if not (existing[TRACK_EN .. tag .. suffix]
             or existing[TRACK_CHUNKS .. tag .. suffix]
+            or existing[TRACK_UNSYNC .. tag .. suffix]
             or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
@@ -682,7 +683,8 @@ local function main()
     end
 
     if #unsync_entries > 0 then
-      local tr = find_or_append_track(TRACK_UNSYNC .. tag)
+      -- v0.28.8: its own track, numbered like this import's Dub Chunks
+      local tr = append_named_track(TRACK_UNSYNC .. suffix)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, e.synced_start, e.dur,
                                  e.orig_start,

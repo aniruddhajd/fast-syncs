@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+36. **v0.28.8: one "Un sync" track per import.**
+    - Both importers used to reuse a single "Un sync" track while every
+      import got a fresh "Dub Chunks <n>". The unsynced clips of two runs
+      therefore piled onto one track.
+    - The Un sync track now carries the same suffix as its Dub Chunks
+      ("Dub Chunks 2" / "Un sync 2", plus `[TEST]` / `[PTEST]`).
+    - `V5.final_dub_rows` (Learn from final dub) reads only the paired
+      Un sync track. Older projects, which have one shared track, still
+      read it.
+
 35. **v0.28.6: Clear memory** (Regenerate tab, next to "Learn from final
     dub").
     - `--clear-memory --language L --text-file F`. `F` holds

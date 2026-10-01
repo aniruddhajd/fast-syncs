@@ -3411,6 +3411,7 @@ local function fresh_name_suffix(tag)
     local suffix = (n == 1) and "" or (" " .. n)
     if not (existing[TRACK_EN .. tag .. suffix]
             or existing[TRACK_CHUNKS .. tag .. suffix]
+            or existing[V5.TRACK_UNSYNC .. tag .. suffix]
             or existing[TRACK_REF .. tag .. suffix]) then
       return suffix
     end
@@ -3631,7 +3632,9 @@ local function import_to_timeline(m)
     end
 
     if #unsync_entries > 0 then
-      local tr = V5.find_or_append_track(V5.TRACK_UNSYNC .. tag)
+      -- v0.28.8: its own track, numbered like this import's Dub Chunks
+      -- (a shared "Un sync" track mixed the clips of two runs together)
+      local tr = append_named_track(V5.TRACK_UNSYNC .. suffix)
       for i, e in ipairs(unsync_entries) do
         local it = add_file_item(tr, tts_wav, off + e.synced_start, e.dur,
                                  e.orig_start,
@@ -8323,12 +8326,26 @@ function V5.final_dub_rows()
     end
   end
   add_items(src_tr, false)
+  -- v0.28.8: only the Un sync track of THIS import ("Dub Chunks 2" pairs
+  -- with "Un sync 2"); projects imported before that share one "Un sync"
+  -- track, which is used as before when no paired track exists.
+  local _, src_nm = reaper.GetSetMediaTrackInfo_String(src_tr, "P_NAME", "",
+                                                       false)
+  local want = src_nm:sub(1, #TRACK_CHUNKS) == TRACK_CHUNKS
+               and (V5.TRACK_UNSYNC .. src_nm:sub(#TRACK_CHUNKS + 1)) or nil
+  local paired, any = nil, {}
   for t = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, t)
     local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
     if tr ~= src_tr and nm:sub(1, #V5.TRACK_UNSYNC) == V5.TRACK_UNSYNC then
-      add_items(tr, true)
+      if want and nm == want then paired = tr end
+      any[#any + 1] = tr
     end
+  end
+  if paired then
+    add_items(paired, true)
+  else
+    for _, tr in ipairs(any) do add_items(tr, true) end
   end
   table.sort(rows, function(a, b) return a.pos < b.pos end)
   return rows
