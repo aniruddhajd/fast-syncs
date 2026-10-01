@@ -168,6 +168,19 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+38. **v0.29.0: script learning and sync learning are separate.**
+    - The single Learn button became "✦ Learn script" and "⏱ Learn
+      timing", each with two confirmations. The learn request gains
+      `MODE: script|sync`; a request with no MODE line (older panels)
+      learns both.
+    - `MODE: sync` learns only the start bias, with no AI call and no
+      script memory touched. `.out` gains a `MODE:` line.
+    - `--clear-memory` gains the scopes `script` (style, translation
+      memory, saved scripts, clip positions) and `sync` (start timing,
+      speaking speed). `language` is both.
+    - The panel's "Clear all" became "Clear <lang> script memory" and
+      "Clear <lang> timing memory".
+
 37. **v0.28.9: "Learn from track" drop-down.**
     - It sits above "Learn from final dub". Entries are "Auto" (the
       selected clip's track, else the newest), then one entry per "Dub

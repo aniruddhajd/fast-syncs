@@ -1778,7 +1778,7 @@ def _run_clear_memory(args, manifest):
             scope = line[6:].strip().lower()
         elif line.startswith("BASE:"):
             base = line[5:].strip()
-    if scope not in ("audio", "language"):
+    if scope not in ("audio", "language", "script", "sync"):
         raise RuntimeError("The clear request names no scope.")
     pl = _import_pipeline()
     tm = pl.translation_memory
@@ -1822,39 +1822,56 @@ def _run_clear_memory(args, manifest):
                    "translates it fresh")
         _note(out[-1].replace("CLEARED: ", "Memory: "))
     else:
+        # v0.29: "script" = style, word choices, corrections, translation
+        # memory, saved scripts and their clip positions; "sync" = start
+        # timing and speaking speed; "language" = both.
+        do_script = scope in ("language", "script")
+        do_sync = scope in ("language", "sync")
         stamp = time.strftime("%Y%m%d_%H%M%S")
         bdir = os.path.join(pl.AI_LEARNING_DIR, f"backup-{stamp}")
         os.makedirs(bdir, exist_ok=True)
         key = pl._lang_key(args.language)
         prof_file = pl.profile_path(args.language)
         sync_file = pl.sync_profile_path(args.language)
-        if os.path.isfile(prof_file):
-            shutil.copy2(prof_file, os.path.join(bdir, key + ".json"))
-        if os.path.isfile(sync_file):
-            shutil.copy2(sync_file, os.path.join(bdir, "sync_" + key + ".json"))
         fw = os.path.join(pl.AI_LEARNING_DIR, "final_windows", key)
-        if os.path.isdir(fw):
-            shutil.copytree(fw, os.path.join(bdir, "final_windows_" + key))
-        shutil.copy2(tm.DB_PATH, os.path.join(bdir, "translation_memory.db"))
-        n_pairs = conn.execute("SELECT COUNT(*) FROM pairs WHERE language = ?",
-                               (lang,)).fetchone()[0]
-        n_docs = conn.execute("SELECT COUNT(*) FROM full_docs WHERE "
-                              "language = ?", (lang,)).fetchone()[0]
-        conn.execute("DELETE FROM pairs WHERE language = ?", (lang,))
-        conn.execute("DELETE FROM full_docs WHERE language = ?", (lang,))
-        conn.commit()
-        for f in (prof_file, sync_file):
-            if os.path.isfile(f):
-                os.remove(f)
-        if os.path.isdir(fw):
-            shutil.rmtree(fw, ignore_errors=True)
-        drop_markers(base)
-        out.append(f"CLEARED: all {args.language} memory — {n_pairs} line "
-                   f"pair(s), {n_docs} saved script(s), the learned style, "
-                   "timing and speaking speed")
+        what = []
+        if do_script:
+            if os.path.isfile(prof_file):
+                shutil.copy2(prof_file, os.path.join(bdir, key + ".json"))
+            if os.path.isdir(fw):
+                shutil.copytree(fw, os.path.join(bdir, "final_windows_" + key))
+            shutil.copy2(tm.DB_PATH, os.path.join(bdir,
+                                                  "translation_memory.db"))
+            n_pairs = conn.execute("SELECT COUNT(*) FROM pairs WHERE "
+                                   "language = ?", (lang,)).fetchone()[0]
+            n_docs = conn.execute("SELECT COUNT(*) FROM full_docs WHERE "
+                                  "language = ?", (lang,)).fetchone()[0]
+            conn.execute("DELETE FROM pairs WHERE language = ?", (lang,))
+            conn.execute("DELETE FROM full_docs WHERE language = ?", (lang,))
+            conn.commit()
+            if os.path.isfile(prof_file):
+                os.remove(prof_file)
+            if os.path.isdir(fw):
+                shutil.rmtree(fw, ignore_errors=True)
+            what.append(f"{n_pairs} line pair(s), {n_docs} saved script(s) "
+                        "and the learned style")
+        if do_sync:
+            if os.path.isfile(sync_file):
+                shutil.copy2(sync_file, os.path.join(bdir,
+                                                     "sync_" + key + ".json"))
+                os.remove(sync_file)
+            what.append("the learned timing and speaking speed")
+        if do_script:
+            drop_markers(base)
+        elif base and os.path.isfile(base + SYNC_LEARNED_SUFFIX):
+            os.remove(base + SYNC_LEARNED_SUFFIX)
+        label = {"language": "all", "script": "the script",
+                 "sync": "the timing"}[scope]
+        out.append(f"CLEARED: {label} {args.language} memory — "
+                   + " and ".join(what))
         out.append(f"BACKUP: {bdir}")
-        _note(f"Memory: everything learned for {args.language} cleared; "
-              f"backup in {bdir}")
+        _note(f"Memory: {label} {args.language} memory cleared; backup in "
+              f"{bdir}")
     out_path = in_path + ".out"
     _write_text(out_path, "\n".join(out) + "\n")
     manifest["clear_txt"] = out_path
@@ -4497,6 +4514,17 @@ def _parse_learn_pieces(text):
 SYNC_LEARNED_SUFFIX = "_sync_learned.json"
 
 
+def _learn_mode(text):
+    """v0.29: 'script', 'sync' or 'both' (a request without a MODE: line,
+    from a panel older than v0.29)."""
+    for line in (text or "").splitlines():
+        if line.strip().startswith("MODE:"):
+            v = line.strip()[5:].strip().lower()
+            if v in ("script", "sync"):
+                return v
+    return "both"
+
+
 def _learn_sync_final(base, text, language):
     """v0.28: learn the user's start bias from where they left the dub
     clips (final start - English start of the same piece). Returns the
@@ -4763,14 +4791,25 @@ def _run_learn_final(args, manifest):
     if not chunks:
         raise RuntimeError("The learn request has no dub chunks with text.")
     out_path = in_path + ".out"
-    # v0.28: timing first — it has its own marker, so it is learned even
+    # v0.29: script learning and sync learning are separate buttons; the
+    # request says which ("MODE: script" / "MODE: sync"; none = both, as
+    # older panels sent). Timing has its own marker, so it is learned even
     # when this dub's text was already learned.
-    sync_line = _learn_sync_final(base, _read_text(in_path), args.language)
+    req_text = _read_text(in_path)
+    mode = _learn_mode(req_text)
+    sync_line = (_learn_sync_final(base, req_text, args.language)
+                 if mode in ("both", "sync") else "")
 
     def finish(lines):
         _write_text(out_path, "\n".join(
-            lines + ([sync_line] if sync_line else [])) + "\n")
+            lines + ([sync_line] if sync_line else [])
+            + [f"MODE: {mode}"]) + "\n")
         manifest["learn_txt"] = out_path
+
+    if mode == "sync":
+        _note("Sync learning only — the script memory is not touched.")
+        finish(["PAIRS: 0", "CORRECTIONS: 0", "HELD: 0"])
+        return
 
     final_text = "\n\n".join(c[2] for c in chunks)
     digest = hashlib.sha256(final_text.strip().encode("utf-8")).hexdigest()

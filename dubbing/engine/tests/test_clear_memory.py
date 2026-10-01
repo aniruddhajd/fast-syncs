@@ -120,5 +120,53 @@ class ClearMemory(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(backup, "marathi.json")))
 
 
+class SeparateScopes(ClearMemory):
+    """v0.29: script memory and timing memory are cleared separately."""
+
+    def test_audio_scope_forgets_only_this_audio(self):
+        pass                                    # covered by ClearMemory
+
+    def test_language_scope_wipes_language_with_backup(self):
+        pass                                    # covered by ClearMemory
+
+    def test_sync_scope_keeps_script_memory(self):
+        out = self._run("sync")
+        self.assertIn("the timing Marathi memory", out)
+        self.assertFalse(os.path.isfile(self.pl.sync_profile_path("Marathi")))
+        self.assertTrue(os.path.isfile(self.pl.profile_path("Marathi")))
+        self.assertEqual(self._count("select count(*) from pairs"), 1)
+
+    def test_script_scope_keeps_timing(self):
+        out = self._run("script")
+        self.assertIn("the script Marathi memory", out)
+        self.assertTrue(os.path.isfile(self.pl.sync_profile_path("Marathi")))
+        self.assertFalse(os.path.isfile(self.pl.profile_path("Marathi")))
+        self.assertEqual(self._count("select count(*) from pairs"), 0)
+
+
+class LearnMode(unittest.TestCase):
+    def test_mode_line(self):
+        self.assertEqual(de._learn_mode("BASE: x\nMODE: sync\n"), "sync")
+        self.assertEqual(de._learn_mode("MODE: script"), "script")
+        self.assertEqual(de._learn_mode("BASE: x\nC: 1|2|t\n"), "both")
+
+    def test_sync_mode_never_touches_the_script_memory(self):
+        d = tempfile.mkdtemp(dir=_TMP)
+        os.makedirs(os.path.join(d, "a"), exist_ok=True)
+        base = os.path.join(d, "a", "a")
+        req = os.path.join(d, "req.txt")
+        with open(req, "w", encoding="utf-8") as f:
+            f.write(f"BASE: {base}\nMODE: sync\nC: 0.0|2.0|नमस्कार मंडळी\n")
+        man = {}
+        with mock.patch.object(de, "_import_pipeline",
+                               side_effect=AssertionError("no script learn")):
+            de._run_learn_final(types.SimpleNamespace(
+                text_file=req, language="Marathi"), man)
+        with open(man["learn_txt"], encoding="utf-8") as f:
+            out = f.read()
+        self.assertIn("MODE: sync", out)
+        self.assertIn("SYNC:", out)
+
+
 if __name__ == "__main__":
     unittest.main()

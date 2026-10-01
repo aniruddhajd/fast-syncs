@@ -5190,7 +5190,7 @@ end
 --   BASE: <out_dir>/<name>          the run's base path, no suffix
 --   C: <start_s>|<len_s>|<text>     one per clip, timeline order
 -- QUIET job; the engine answers <request>.out, summarised in the banner.
-function V5.learn_final_request()
+function V5.learn_final_request(mode)
   ui_clear_banner()
   local base = V5.run_base()
   if not base then
@@ -5203,7 +5203,8 @@ function V5.learn_final_request()
     ui_set_banner("error", why or "No dub clips with text found.")
     return false
   end
-  local lines = { 'BASE: ' .. base }
+  -- v0.29: "script" or "sync" — the two learnings are separate buttons
+  local lines = { 'BASE: ' .. base, 'MODE: ' .. (mode or 'script') }
   for _, r in ipairs(rows) do
     lines[#lines + 1] = string.format('C: %.3f|%.3f|%s', r.pos, r.len,
                                       (tostring(r.text):gsub('%s+', ' ')))
@@ -7497,7 +7498,10 @@ local function _finish_run(exit_code)
       end
       local sync_msg = (got.SYNC or '') ~= '' and ('\nTiming: ' .. got.SYNC)
                        or ''
-      if got.SKIPPED == '1' then
+      if got.MODE == 'sync' then
+        ui_set_banner("info", (got.SYNC or '') ~= ''
+          and ("Timing: " .. got.SYNC) or "Timing: nothing to learn.")
+      elseif got.SKIPPED == '1' then
         ui_set_banner("info", "This final dub's wording was already " ..
                               "learned." .. sync_msg)
       else
@@ -9088,34 +9092,58 @@ function V5.learn_final_chip(ctx)
   local busy = V5.busy()
   local test = V5.is_ptest_dir(_regen_out_dir)
   local can = _regen_out_dir ~= "" and not busy and not test
+  -- v0.29: two separate learnings — the SCRIPT (words, style, corrections,
+  -- saved script) and the SYNC (where you place lines vs the English).
+  -- Each asks twice (v0.27.1): both steer every later AI run.
+  local running = V5.quiet_job == "learnf"
   _ui_begin_disabled(ctx, not can)
-  if V5.chip(ctx, (V5.quiet_job == "learnf" and '… Learning' or
-                   '✦ Learn from final dub') .. '##learnfinal',
+  if V5.chip(ctx, (running and '… Learning' or '✦ Learn script') ..
+                  '##learnscript',
              test and ('This is a Prompt agents run (a _PTEST folder). ' ..
                        'Prompt-agent runs never teach AI mode.') or
-             'Teach AI mode from the dub as it is on the timeline now — ' ..
-             'including every line you regenerated after the review. ' ..
-             'Stores the lines in the translation memory and updates the ' ..
-             'learned style (one text-only AI call, no voice credits). ' ..
-             'Press it when the dub is final; pressing again learns only ' ..
-             'what changed.') and can then
-    -- v0.27.1: two confirmations — what it learns goes into the shared AI
-    -- memory and steers every later AI run, so a stray click must not
-    -- teach it an unfinished dub. ShowMessageBox type 4 = Yes/No, 6 = Yes.
+             'Teach AI mode the WORDING of the dub on the timeline now — ' ..
+             'every line, including the ones you regenerated: translation ' ..
+             'memory, word choices, style and your corrections (one ' ..
+             'text-only AI call, no voice credits). Timing is not touched.')
+     and can then
     if reaper.ShowMessageBox(
-         "Learn from this dub?\n\n" ..
-         "AI mode will store every line on the timeline now (including " ..
-         "lines you regenerated) in its memory and update its learned " ..
-         "style. It also learns your TIMING: where you placed the clips " ..
-         "compared with the English.\n\nOnly do this when the dub is FINAL.",
-         "Learn from final dub (1 of 2)", 4) == 6
+         "Learn the SCRIPT from this dub?\n\n" ..
+         "AI mode stores every line on the timeline now (including lines " ..
+         "you regenerated) and updates its words, style and corrections. " ..
+         "Timing is not changed.\n\nOnly do this when the text is FINAL.",
+         "Learn script (1 of 2)", 4) == 6
        and reaper.ShowMessageBox(
-         "Are you sure?\n\n" ..
-         "Everything it learns is used by every future AI run for " ..
-         "this language, and it cannot be undone from the panel.\n\n" ..
-         "Yes = learn now     No = cancel",
-         "Learn from final dub (2 of 2)", 4) == 6 then
-      V5.learn_final_request()
+         "Are you sure?\n\nIt is used by every future AI run for this " ..
+         "language.\n\nYes = learn now     No = cancel",
+         "Learn script (2 of 2)", 4) == 6 then
+      V5.learn_final_request('script')
+    end
+  end
+  _ui_end_disabled(ctx)
+  local avail = reaper.ImGui_GetContentRegionAvail(ctx)
+  if type(avail) == 'number' and avail > V5.chip_w(ctx, '✦ Learn script')
+       + V5.chip_w(ctx, '⏱ Learn timing') + 18 then
+    reaper.ImGui_SameLine(ctx, 0, 6)
+  end
+  _ui_begin_disabled(ctx, not can)
+  if V5.chip(ctx, (running and '… Learning' or '⏱ Learn timing') ..
+                  '##learnsync',
+             test and ('This is a Prompt agents run (a _PTEST folder). ' ..
+                       'Prompt-agent runs never teach AI mode.') or
+             'Teach AI mode your TIMING: where you placed the clips compared ' ..
+             'with the English (start bias, used after about 30 lines). No ' ..
+             'AI call. The script memory is not touched.') and can then
+    if reaper.ShowMessageBox(
+         "Learn the TIMING from this dub?\n\n" ..
+         "AI mode learns where you placed the clips compared with the " ..
+         "English. The words are not changed.\n\nOnly do this when the " ..
+         "clip positions are FINAL.",
+         "Learn timing (1 of 2)", 4) == 6
+       and reaper.ShowMessageBox(
+         "Are you sure?\n\nIt shifts the placement of every future AI " ..
+         "run for this language.\n\nYes = learn now     No = cancel",
+         "Learn timing (2 of 2)", 4) == 6 then
+      V5.learn_final_request('sync')
     end
   end
   _ui_end_disabled(ctx)
@@ -9147,35 +9175,35 @@ function V5.clear_memory_chips(ctx)
     end
   end
   _ui_end_disabled(ctx)
-  -- beside it only when it fits; otherwise on the next line
-  local all_label = 'Clear all ' .. lang .. ' memory'
-  local avail = reaper.ImGui_GetContentRegionAvail(ctx)
-  if type(avail) == 'number' and avail > V5.chip_w(ctx, 'Forget this audio')
-       + V5.chip_w(ctx, all_label) + 18 then
-    reaper.ImGui_SameLine(ctx, 0, 6)
-  end
-  _ui_begin_disabled(ctx, busy or lang == '')
-  if V5.chip(ctx, all_label .. '##clearall',
-             'Wipe EVERYTHING AI mode learned for ' .. lang .. ': style, ' ..
-             'word choices, corrections, translation memory, timing and ' ..
-             'speaking speed. A backup is made first (dubbing/data/' ..
-             'ai_learning/backup-<time>).', true) and not busy
-     and lang ~= '' then
-    if reaper.ShowMessageBox(
-         "Clear ALL " .. lang .. " memory?\n\n" ..
-         "AI mode forgets every style rule, word choice, correction, saved " ..
-         "script and timing it learned for " .. lang .. ", and starts " ..
-         "from zero.\n\nA backup copy is kept.",
-         "Clear all memory (1 of 2)", 4) == 6
-       and reaper.ShowMessageBox(
-         "Are you sure?\n\nThis cannot be undone from the panel (only by " ..
-         "restoring the backup by hand).\n\n" ..
-         "Yes = clear everything     No = cancel",
-         "Clear all memory (2 of 2)", 4) == 6 then
-      V5.clear_memory_request('language', lang)
+  -- v0.29: script memory and timing memory are cleared separately.
+  local function clear_chip(scope, label, tip, what)
+    local avail = reaper.ImGui_GetContentRegionAvail(ctx)
+    if type(avail) == 'number' and avail > V5.chip_w(ctx, label) + 12 then
+      reaper.ImGui_SameLine(ctx, 0, 6)
     end
+    _ui_begin_disabled(ctx, busy or lang == '')
+    if V5.chip(ctx, label .. '##clear' .. scope, tip, true) and not busy
+       and lang ~= '' then
+      if reaper.ShowMessageBox(
+           "Clear the " .. lang .. " " .. what .. "?\n\n" .. tip ..
+           "\n\nA backup copy is kept.",
+           label .. " (1 of 2)", 4) == 6
+         and reaper.ShowMessageBox(
+           "Are you sure?\n\nThis cannot be undone from the panel (only " ..
+           "by restoring the backup by hand).\n\n" ..
+           "Yes = clear     No = cancel", label .. " (2 of 2)", 4) == 6 then
+        V5.clear_memory_request(scope, lang)
+      end
+    end
+    _ui_end_disabled(ctx)
   end
-  _ui_end_disabled(ctx)
+  clear_chip('script', 'Clear ' .. lang .. ' script memory',
+             'Forgets every style rule, word choice, correction, saved script ' ..
+             'and line pair learned for ' .. lang .. '. Timing stays.',
+             'script memory')
+  clear_chip('sync', 'Clear ' .. lang .. ' timing memory',
+             'Forgets the learned start timing and speaking speed for ' ..
+             lang .. '. The script memory stays.', 'timing memory')
 end
 
 function V5.clear_memory_request(scope, lang)
