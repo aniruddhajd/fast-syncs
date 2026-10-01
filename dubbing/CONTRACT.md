@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+29. **v0.29.3: one "Clear AI memory (<lang>)" button** (Regenerate tab and
+    success screen, under "Learn from final dub"; asks twice).
+    - It runs `--clear-memory --language L`, local files only. That first
+      copies the profile, the `sync/<lang>.json` and `final_windows/<lang>/`
+      left by v0.28–v0.29, and the memory DB to
+      `ai_learning/backup-<time>/`.
+    - It then deletes L's `pairs` and `full_docs` rows and those files.
+      Other languages stay.
+    - Manifest: `{status, error, clear_summary, clear_backup}`.
+
 28. **v0.29.2: rollback to the v0.25.1 code** (the user's call). Every
     change of v0.26.0–v0.29.0 is reverted (git revert, history kept), and
     this is the v0.25.1 engine and panel unchanged. It is numbered 0.29.2
