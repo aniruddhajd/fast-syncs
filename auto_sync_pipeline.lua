@@ -1,6 +1,6 @@
 -- @description Fast Syncs — AI dubbing sync for REAPER
 -- @author aniruddhajd
--- @version 0.29.5
+-- @version 0.29.9
 -- @about
 --   Transcribes your Dialogue VO and Dub tracks, asks Gemini which dubbed clip
 --   means the same thing as which English clip, and moves each dubbed clip to
@@ -584,9 +584,17 @@ local function try_reapack_bootstrap()
   local url  = "https://github.com/cfillion/reapack/releases/latest/download/" .. asset
   -- Full path on macOS/Linux — ExecProcess may not search a login-shell PATH.
   local curl = reaper.GetOS():match("Win") and "curl.exe" or "/usr/bin/curl"
-  local ret = reaper.ExecProcess(
-    curl .. ' -fsSL --retry 2 -o "' .. dest .. '" "' .. url .. '"', 120000)
+  local args = ' -fsSL --retry 2 -o "' .. dest .. '" "' .. url .. '"'
+  local ret = reaper.ExecProcess(curl .. args, 120000)
   local code = ret and ret:match("^(%-?%d+)")
+  -- Exit 35 on Windows = Schannel could not reach the revocation server
+  -- (HTTPS-scanning antivirus, locked-down network). Retry once with
+  -- --ssl-revoke-best-effort: a certificate known to be revoked is still
+  -- rejected; only the unreachable lookup is tolerated (curl 7.70+).
+  if code == "35" and reaper.GetOS():match("Win") then
+    ret  = reaper.ExecProcess(curl .. ' --ssl-revoke-best-effort' .. args, 120000)
+    code = ret and ret:match("^(%-?%d+)")
+  end
   -- Sanity: exit 0 and a plausibly-sized binary (assets are ~2 MB).
   local f = io.open(dest, "rb")
   local size = 0

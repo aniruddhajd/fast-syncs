@@ -1466,10 +1466,15 @@ local function try_reapack_bootstrap()
   -- ExecProcess is synchronous — REAPER's UI is frozen for the duration.
   -- Bound the network work (10 s to connect, 60 s total) so a slow/offline
   -- network can't lock the UI for the full 2 minutes.
-  local ret = reaper.ExecProcess(
-    curl .. ' -fsSL --retry 2 --connect-timeout 10 -m 60 -o "'
-         .. dest .. '" "' .. url .. '"', 65000)
+  local args = ' -fsSL --retry 2 --connect-timeout 10 -m 60 -o "'
+               .. dest .. '" "' .. url .. '"'
+  local ret = reaper.ExecProcess(curl .. args, 65000)
   local code = ret and ret:match("^(%-?%d+)")
+  -- v0.29.9: exit 35 on Windows = revocation lookup blocked (see V5.win_curl).
+  if code == "35" and reaper.GetOS():match("Win") then
+    ret  = reaper.ExecProcess(curl .. ' --ssl-revoke-best-effort' .. args, 65000)
+    code = ret and ret:match("^(%-?%d+)")
+  end
   local f = io.open(dest, "rb")
   local size = 0
   if f then size = f:seek("end") or 0; f:close() end
@@ -4008,6 +4013,22 @@ function V5.win_hidden(cmd, tag)
                             bat .. '"', -2) ~= nil
 end
 
+-- v0.29.9: a cmd.exe curl call that survives a blocked revocation check.
+-- Windows curl (Schannel) asks the CA online whether the certificate was
+-- revoked; HTTPS-scanning antivirus or a locked-down network blocks that and
+-- curl fails with exit 35 CRYPT_E_NO_REVOCATION_CHECK on a perfectly good
+-- certificate. Verify normally first; only on exit 35 retry once with
+-- --ssl-revoke-best-effort, which still rejects a certificate known to be
+-- revoked and only tolerates the lookup being unreachable (curl 7.70+).
+-- *args* is everything after "curl.exe", redirects included. The whole `if`
+-- is parenthesised: unwrapped, cmd.exe treats every `& ...` after it as part
+-- of the if-body, so the caller's tail would only run on a retry. errorlevel
+-- afterwards is the last curl's exit code.
+function V5.win_curl(args)
+  return 'curl.exe ' .. args .. ' & (if errorlevel 35 if not errorlevel 36 ' ..
+         'curl.exe --ssl-revoke-best-effort ' .. args .. ')'
+end
+
 -- "0.14.1" → {0,14,1}, compared field by field so 0.9 sorts BELOW 0.14.
 -- Returns -1 when a is older than b.
 function V5.ver_cmp(a, b)
@@ -4045,8 +4066,9 @@ function V5.check_update()
 
   if _is_windows() then
     -- curl.exe ships with Windows 10 1803+; -s quiet, -m caps the transfer.
-    local line = 'curl.exe -s -m 12 -o "' .. part .. '" ' .. V5.UPD_URL ..
-                 ' && move /y "' .. part .. '" "' .. out .. '"'
+    -- `if not errorlevel 1` stands in for `&&` after V5.win_curl.
+    local line = V5.win_curl('-s -m 12 -o "' .. part .. '" ' .. V5.UPD_URL) ..
+                 ' & if not errorlevel 1 move /y "' .. part .. '" "' .. out .. '"'
     if not V5.win_hidden(line, 'upd') then
       reaper.ExecProcess('cmd.exe /C ' .. line, -2)
     end
@@ -4306,9 +4328,11 @@ function V5.conn_probe(pv)
     -- file when curl wrote none, so a failed curl completes at once instead of
     -- showing "no answer in 20 s" — and, unlike `if not exist`, it cannot
     -- swallow the `& move` that follows it.
-    local line = 'curl.exe -sS -m 15 -o "' .. part .. '" -w "%{http_code}"' ..
-      h .. ' "' .. url .. '" > "' .. code .. '" 2> "' .. err .. '" & type nul >> "' ..
-      part .. '" & move /y "' .. part .. '" "' .. out .. '"'
+    -- v0.29.9: V5.win_curl retries a blocked revocation check; the retry
+    -- overwrites .code/.err, so the row reports the attempt that counted.
+    local line = V5.win_curl('-sS -m 15 -o "' .. part .. '" -w "%{http_code}"' ..
+      h .. ' "' .. url .. '" > "' .. code .. '" 2> "' .. err .. '"') ..
+      ' & type nul >> "' .. part .. '" & move /y "' .. part .. '" "' .. out .. '"'
     -- One .bat per provider: probes for several APIs can be in flight at once.
     if not V5.win_hidden(line, 'conn_' .. pv) then
       reaper.ExecProcess('cmd.exe /C ' .. line, -2)
@@ -4568,8 +4592,8 @@ function V5.fetch_releases()
 
   -- Quoted URL: its "?" must not reach a shell as a glob on macOS.
   if _is_windows() then
-    local line = 'curl.exe -s -m 15 -o "' .. part .. '" "' .. V5.REL_URL ..
-                 '" && move /y "' .. part .. '" "' .. out .. '"'
+    local line = V5.win_curl('-s -m 15 -o "' .. part .. '" "' .. V5.REL_URL .. '"') ..
+                 ' & if not errorlevel 1 move /y "' .. part .. '" "' .. out .. '"'
     if not V5.win_hidden(line, 'rel') then
       reaper.ExecProcess('cmd.exe /C ' .. line, -2)
     end

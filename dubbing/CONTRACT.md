@@ -168,6 +168,15 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+32. **v0.29.9: Windows curl survives a blocked revocation check.** Schannel
+    curl fails with exit 35 `CRYPT_E_NO_REVOCATION_CHECK` when an
+    HTTPS-scanning antivirus or the network blocks the CA's revocation
+    server. Every Windows curl call (Connections probe, update check,
+    release notes, ReaPack bootstrap in both Lua files) now verifies
+    normally first and, only on exit 35, retries once with
+    `--ssl-revoke-best-effort` (`V5.win_curl`). A certificate known to be
+    revoked is still rejected. No file format changes.
+
 31. **v0.29.7: "Longer (add pauses)" adds silence to the audio**
     (Regenerate tab) — the mirror of entry 29. `--add-pauses [--add-s <s>]`
     with the same `--in-wav/--out-wav/--in-start/--in-len`
