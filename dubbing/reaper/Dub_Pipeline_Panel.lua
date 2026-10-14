@@ -671,6 +671,10 @@ local VOICE_ID   = ""             -- v0.3: persisted in config/tts_settings.json
 local EL_MODEL   = "eleven_v3"    -- v0.3: persisted in config/tts_settings.json
 local LAST_AUDIO = ""
 local FULL_RUN   = false          -- true = v0.1 one-shot run (no review pause)
+-- v0.30: "AI · learns" (SCRIPT_MODE "ai") is hidden from the Script row and
+-- switched off — the user's call. A saved "ai" loads as "auto". Set true to
+-- bring it back; the engine side (--script-source ai) is untouched.
+V5.AI_LEARNS_ON = false
 local SCRIPT_MODE = "auto"        -- v0.4: "auto" = LLM prompt chain,
                                   -- "have" = user pastes the translation,
                                   -- "ai" (v0.18) = self-learning translator
@@ -689,6 +693,18 @@ function V5.is_ai_mode()
   -- v0.25: "Prompt agents · test" also uses AI mode's sync (anchor sync).
   return SCRIPT_MODE == 'ai' or SCRIPT_MODE == 'ai_test'
          or SCRIPT_MODE == 'prompt_agents'
+end
+
+-- v0.29.6 AI · test rules option: may the dub step speed up a piece that runs
+-- past its slot (up to x1.25, pitch kept)? ON is what every run did before
+-- this switch existed. OFF sends --no-speedup: the tempo is never changed,
+-- long pieces are rewritten shorter or go to the Unsync track. Saved in the
+-- panel settings ("ai_speedup"); the checkbox is V5.speedup_check.
+V5.ai_speedup = true
+
+-- True when the next dub launch must carry --no-speedup.
+function V5.no_speedup()
+  return SCRIPT_MODE == 'ai_test' and not V5.ai_speedup
 end
 
 -- Any test run's folder: <audio>_TEST (AI · test rules) or <audio>_PTEST
@@ -842,8 +858,12 @@ local function load_settings()
      or v == "prompt_agents" or v == "eleven" then
     SCRIPT_MODE = v
   end
+  -- v0.30: AI · learns is off (V5.AI_LEARNS_ON) — never load into it.
+  if SCRIPT_MODE == "ai" and not V5.AI_LEARNS_ON then SCRIPT_MODE = "auto" end
   local b = json_field(content, "full_run")
   if type(b) == "boolean" then FULL_RUN = b end
+  b = json_field(content, "ai_speedup")
+  if type(b) == "boolean" then V5.ai_speedup = b end
   -- v0.13 UI state: reveals stay open across launches, and the Tools/Settings
   -- panes reopen where they were left. Purely cosmetic — an absent or
   -- hand-mangled value just falls back to the defaults in the V5 table.
@@ -897,6 +917,7 @@ local function save_settings()
   f:write(string.format('  "python_cmd": "%s",\n', je(PYTHON_CMD)))
   f:write(string.format('  "language": "%s",\n',   je(LANGUAGE)))
   f:write(string.format('  "full_run": %s,\n',     FULL_RUN and 'true' or 'false'))
+  f:write(string.format('  "ai_speedup": %s,\n',   V5.ai_speedup and 'true' or 'false'))
   f:write(string.format('  "script_mode": "%s",\n', je(SCRIPT_MODE)))
   f:write(string.format('  "vc_voice_id": "%s",\n', je(VC_VOICE_ID)))
   -- v0.13 UI state: reveals stay open across launches for power users, and
@@ -1623,7 +1644,7 @@ local _run_mode        = "full"    -- full | translate | dub | regen |
 -- Utility modes never own the phase state: they report back into the phase
 -- they were launched from and leave the last run's manifest untouched.
 local UTIL_MODES = { regen = true, test_llm = true, list_voices = true, suggest = true, assist = true, reco = true,
-                     learnf = true,
+                     learnf = true, skip = true,
                      voice_change = true, tts = true, preview = true }
 local _util_return_phase = "setup" -- phase to return to when test/fetch ends
 
@@ -1652,6 +1673,7 @@ function V5.quiet_label()
   if V5.quiet_job == "reco" then return "Recommending voices" end
   if V5.quiet_job == "learnf" then return "Learning from the final dub" end
   if V5.quiet_job == "clearmem" then return "Clearing the AI memory" end
+  if V5.quiet_job == "skip" then return "Changing the pauses in a chunk" end
   return "Still fetching the ElevenLabs voices"
 end
 
@@ -1938,6 +1960,38 @@ function V5.hint(ctx, text)
   reaper.ImGui_PopStyleColor(ctx)
   if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
     reaper.ImGui_SetTooltip(ctx, V5.wrap(text))
+  end
+end
+
+-- v0.29.6 the AI · test rules speed-up checkbox (V5.ai_speedup). *compact*:
+-- one line with the explanation in its tooltip (the review screen's
+-- transport bar); otherwise the explanation sits under it, as in Setup.
+V5.SPEEDUP_OFF_HINT = 'Off: the tempo is never changed; long pieces are ' ..
+                      'rewritten shorter or go to the Unsync track.'
+function V5.speedup_check(ctx, compact)
+  -- Setup: a bare box and the label wrapped beside it — a checkbox label
+  -- never wraps, and this one is wider than a narrow form.
+  local rv, on = reaper.ImGui_Checkbox(ctx,
+    (compact and 'Speed up long pieces (≤1.25×)' or '') .. '##aispeedup',
+    V5.ai_speedup)
+  if rv then
+    V5.ai_speedup = on and true or false
+    save_settings()
+  end
+  local tip = 'On: a piece that runs past its slot is sped up, up to x1.25 ' ..
+              'with the pitch kept. ' .. V5.SPEEDUP_OFF_HINT
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, V5.wrap(tip))
+  end
+  if not compact then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextWrapped(ctx, 'Speed up pieces that run long (up to 1.25×)')
+    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, V5.wrap(tip))
+    end
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.dimmer)
+    reaper.ImGui_TextWrapped(ctx, V5.SPEEDUP_OFF_HINT)
+    reaper.ImGui_PopStyleColor(ctx)
   end
 end
 
@@ -3082,6 +3136,10 @@ local MANIFEST_KEYS = {
   "learn_txt",
   -- v0.29.3: --clear-memory manifest (Clear AI memory button).
   "clear_summary", "clear_backup",
+  -- v0.29.5: --skip-pauses manifest (the wav itself comes back in regen_wav).
+  "pauses_cut", "removed_s",
+  -- v0.29.7: --add-pauses (Longer (add pauses) on the Regenerate tab).
+  "added_s",
   -- v0.13: pause-aware plan manifest ("status":"plan"). The counts are
   -- strings like every other numeric field here — json_field returns
   -- numbers as text and every consumer tonumber()s what it needs.
@@ -3723,6 +3781,19 @@ local function build_engine_cmd(py, opts)
   if opts.voice_change then
     parts[#parts + 1] = '--voice-change'
   end
+  -- v0.29.5 Shorter (skip pauses): local audio cut, numbers only on argv.
+  if opts.skip_pauses or opts.add_pauses then
+    parts[#parts + 1] = opts.add_pauses and '--add-pauses' or '--skip-pauses'
+    -- v0.29.7 Longer (add pauses): how much silence, in source seconds.
+    if opts.add_pauses then
+      parts[#parts + 1] = '--add-s'
+      parts[#parts + 1] = string.format('%.6f', opts.add_s or 0)
+    end
+    parts[#parts + 1] = '--in-start'
+    parts[#parts + 1] = string.format('%.6f', opts.in_start or 0)
+    parts[#parts + 1] = '--in-len'
+    parts[#parts + 1] = string.format('%.6f', opts.in_len or 0)
+  end
   if opts.in_wav then
     parts[#parts + 1] = '--in-wav'
     parts[#parts + 1] = q(opts.in_wav)
@@ -3766,6 +3837,10 @@ local function build_engine_cmd(py, opts)
   if opts.plan then
     parts[#parts + 1] = '--plan'
     parts[#parts + 1] = q(opts.plan)
+  end
+  -- v0.29.6 AI · test rules: "Speed up pieces that run long" is off.
+  if opts.no_speedup then
+    parts[#parts + 1] = '--no-speedup'
   end
   if opts.text_file then
     parts[#parts + 1] = '--text-file'
@@ -4403,6 +4478,9 @@ function V5.update_popup_if_due()
   if not V5.upd.popup or V5.upd.asked then return end
   V5.upd.popup = false
   V5.upd.asked = true
+  -- v0.30: the user rolled back to THIS version on purpose — do not nag them
+  -- to update on every launch. About still says a newer one is available.
+  if V5.pinned_version() == V5.APP_VERSION then return end
   local choice = reaper.MB(
     'A newer version of Fast Syncs is available.\n\n' ..
     '    installed   v' .. tostring(V5.APP_VERSION) .. '\n' ..
@@ -4428,10 +4506,129 @@ function V5.run_updater()
     return
   end
   local cmd = V5.run_in_terminal(p)
+  -- Going to the newest version ends any roll back: the "update available"
+  -- dialog may speak up again from now on.
+  V5.set_pinned_version("")
   reaper.MB("The updater is opening in a separate terminal window.\n\n" ..
             "When it says 'Update complete', close it and run the script " ..
             "again to load the new version.\n\nIf no window appeared, run " ..
             "this manually:\n  " .. cmd, "Updating", 0)
+end
+
+-- ── v0.30 version roll back ─────────────────────────────────────────────────
+-- Settings → About lists every published release in a dropdown; "Roll back…"
+-- runs the shared updater with `--version X.Y.Z`, which installs that one
+-- release's fast-syncs.zip (or checks out its tag on a git install) instead
+-- of the newest. Settings, keys, both venvs and AI memory are outside the ZIP,
+-- so they survive exactly as they do a normal update.
+--
+-- The list comes from the GitHub releases API, fetched with the same
+-- fire-and-forget curl as V5.check_update (a blocking fetch would freeze
+-- REAPER) and read back on a later frame. Once per session, on first view of
+-- the About pane; "Refresh" re-fetches. Unauthenticated, so 60 calls per hour
+-- per IP — far more than one person clicking will ever use.
+V5.REL_URL =
+  'https://api.github.com/repos/aniruddhajd/fast-syncs/releases?per_page=100'
+V5.rel = {
+  state    = 'idle',    -- idle | loading | ready | failed
+  list     = {},        -- "0.29.3", "0.29.2", … newest first
+  file     = nil,
+  deadline = 0,
+  pick     = nil,       -- the version chosen in the dropdown
+}
+
+-- The version the user deliberately rolled back to ("" = none). Persistent
+-- ExtState, so it survives the REAPER restart the roll back needs.
+function V5.pinned_version()
+  return reaper.GetExtState(V5.STATUS_EXT_SECTION, 'pinned_version') or ''
+end
+
+function V5.set_pinned_version(ver)
+  if ver == '' then
+    reaper.DeleteExtState(V5.STATUS_EXT_SECTION, 'pinned_version', true)
+  else
+    reaper.SetExtState(V5.STATUS_EXT_SECTION, 'pinned_version', ver, true)
+  end
+end
+
+function V5.fetch_releases()
+  if V5.rel.state == 'loading' then return end
+  if _is_windows() and not reaper.ExecProcess then
+    V5.rel.state = 'failed' return
+  end
+  local sep  = _is_windows() and '\\' or '/'
+  local out  = V5.tmp_dir() .. sep .. 'fs_releases.json'
+  local part = out .. '.part'
+  os.remove(out)
+  os.remove(part)
+
+  V5.rel.file     = out
+  V5.rel.state    = 'loading'
+  V5.rel.deadline = os.time() + 25
+
+  -- Quoted URL: its "?" must not reach a shell as a glob on macOS.
+  if _is_windows() then
+    local line = 'curl.exe -s -m 15 -o "' .. part .. '" "' .. V5.REL_URL ..
+                 '" && move /y "' .. part .. '" "' .. out .. '"'
+    if not V5.win_hidden(line, 'rel') then
+      reaper.ExecProcess('cmd.exe /C ' .. line, -2)
+    end
+  else
+    os.execute('{ curl -s -m 15 -o "' .. part .. '" "' .. V5.REL_URL ..
+               '" && mv -f "' .. part .. '" "' .. out .. '" ; } ' ..
+               '>/dev/null 2>&1 &')
+  end
+end
+
+-- Called every frame. Cheap until the fetch lands. Pulls every
+-- "tag_name": "vX.Y.Z" out of the JSON with a pattern (no JSON library here);
+-- a tag with anything after the digits — "v0.22.0-beta.1" — does not match,
+-- so pre-releases are left out, and the updater only accepts digits anyway.
+function V5.poll_releases()
+  if V5.rel.state ~= 'loading' then return end
+  local f = V5.rel.file and io.open(V5.rel.file, 'r')
+  if f then
+    local raw = f:read('*a') or ''
+    f:close()
+    os.remove(V5.rel.file)
+    local seen, list = {}, {}
+    for v in raw:gmatch('"tag_name"%s*:%s*"v?([%d%.]+)"') do
+      if not seen[v] then seen[v] = true; list[#list + 1] = v end
+    end
+    table.sort(list, function(a, b) return V5.ver_cmp(a, b) > 0 end)
+    V5.rel.list  = list
+    V5.rel.state = (#list > 0) and 'ready' or 'failed'
+    -- Start the dropdown on the installed version when it is listed.
+    if not seen[V5.rel.pick or ''] then
+      V5.rel.pick = seen[V5.APP_VERSION or ''] and V5.APP_VERSION or list[1]
+    end
+    return
+  end
+  if os.time() > V5.rel.deadline then V5.rel.state = 'failed' end
+end
+
+-- Confirm, then run the updater pinned to *ver*.
+function V5.run_rollback(ver)
+  local p = V5.updater_path()
+  if not p or not ver or not ver:match('^%d[%d%.]*$') then return end
+  local older = V5.ver_cmp(ver, V5.APP_VERSION) < 0
+  local choice = reaper.MB(
+    (older and 'Roll back' or 'Switch') .. ' Fast Syncs to v' .. ver .. '?\n\n' ..
+    '    installed   v' .. tostring(V5.APP_VERSION) .. '\n' ..
+    '    install     v' .. ver .. '\n\n' ..
+    'The updater opens in its own terminal window and replaces the sync ' ..
+    'tool and this dubbing app with that version. Your settings, API keys, ' ..
+    'venvs and AI memory are kept.\n\n' ..
+    'When it says "Version ' .. ver .. ' installed", close it and run this ' ..
+    'script again. To come back later: Settings → About → Re-install latest.',
+    older and 'Roll back' or 'Switch version', 4)
+  if choice ~= 6 then return end
+  local cmd = V5.run_in_terminal(p, '--version ' .. ver)
+  -- Remembered so the next launch does not immediately offer to undo it.
+  V5.set_pinned_version(ver)
+  reaper.MB("The updater is opening in a separate terminal window.\n\n" ..
+            "If no window appeared, run this manually:\n  " .. cmd,
+            "Installing v" .. ver, 0)
 end
 
 -- Offer to run the one-time dubbing setup (creates dubbing/venv/ and
@@ -4799,7 +4996,8 @@ local function start_dub_run()
     if not (_provided_text or ""):match("%S") then
       ui_set_banner("error",
         "Script is set to 'I have a script' — paste the translated script " ..
-        "first (or switch Script to 'Prompt chain' or 'AI · learns').")
+        "first (or switch Script to 'Prompt chain'" ..
+        (V5.AI_LEARNS_ON and " or 'AI · learns'" or "") .. ").")
       return false
     end
     provided_path = write_provided_script(audio, _provided_text)
@@ -4816,6 +5014,7 @@ local function start_dub_run()
     provided_script = provided_path,
     script_source = (V5.is_ai_mode() or SCRIPT_MODE == "eleven")
                     and SCRIPT_MODE or nil,
+    no_speedup = V5.no_speedup(),
   })
   local header = {
     "[panel] Python : " .. py,
@@ -6613,6 +6812,7 @@ local function launch_dub_continue(script_path)
     voice_id = voice,
     script_source = (V5.is_ai_mode() or SCRIPT_MODE == "eleven")
                     and SCRIPT_MODE or nil,
+    no_speedup = V5.no_speedup(),
   })
   local log = {
     "[panel] Python : " .. py,
@@ -6623,6 +6823,9 @@ local function launch_dub_continue(script_path)
     "[panel] Voice  : " .. (voice or "(the ⚙ Settings voice)"),
   }
   if cast_note then log[#log + 1] = cast_note end
+  if V5.no_speedup() then
+    log[#log + 1] = "[panel] Speed  : long pieces never sped up (--no-speedup)"
+  end
   return launch_engine(cmd, "dub", log)
 end
 
@@ -6855,6 +7058,118 @@ function V5.regen_revert()
   return true
 end
 
+-- v0.29.5 "Shorter (skip pauses)" on the Regenerate tab: the SAME take with
+-- its pauses cut out. The engine's --skip-pauses mode (local, no credits)
+-- reads exactly the stretch of the source wav this chunk plays, shortens
+-- every pause to a short breath, joins the speech and writes a new wav in
+-- regen/; the swap below works like a regeneration, so "Put the old one
+-- back" undoes it. The words never change.
+-- v0.29.7: *add_s* given = "Longer (add pauses)": the same take with
+-- silence put INTO its pauses (add_s seconds of timeline in total, shared by
+-- the pauses; 0 = the engine's 0.3 s each). nil = Shorter (skip pauses).
+function V5.start_skip_pauses(item, add_s)
+  ui_clear_banner()
+  local adding = add_s ~= nil
+  local take = item and reaper.GetActiveTake(item)
+  if not take or reaper.TakeIsMIDI(take) then
+    ui_set_banner("error", "This chunk has no audio take to cut.")
+    return false
+  end
+  local src = reaper.GetMediaItemTake_Source(take)
+  local path = src and reaper.GetMediaSourceFileName(src, "") or ""
+  if path == "" or not file_exists(path) then
+    ui_set_banner("error",
+      "This chunk's audio is not a plain file on disk — nothing to cut.")
+    return false
+  end
+  local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+  if rate <= 0 then rate = 1.0 end
+  -- The take plays [STARTOFFS, STARTOFFS + LENGTH * rate] of its source.
+  local offs = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+  local len  = reaper.GetMediaItemInfo_Value(item, "D_LENGTH") * rate
+
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local n = math.floor(pos * 1000 + 0.5)
+  local out_dir = (_regen_out_dir ~= "" and _regen_out_dir or dirname(path))
+                  .. SEP .. "regen"
+  reaper.RecursiveCreateDirectory(out_dir, 0)
+  local k, wav = 1, nil
+  repeat
+    wav = string.format("%s%schunk_%d_%s_v%d.wav", out_dir, SEP, n,
+                        adding and "pauses" or "nopause", k)
+    k = k + 1
+  until not file_exists(wav)
+
+  local py = preflight_engine(false)
+  if not py then return false end
+  local lang = (_regen_lang ~= "" and _regen_lang) or LANGUAGE
+  local cmd = build_engine_cmd(py, {
+    skip_pauses = not adding, add_pauses = adding,
+    -- The take plays its source at *rate*: a second of timeline is rate
+    -- seconds of source.
+    add_s = adding and (add_s * rate) or nil,
+    in_wav = path, out_wav = wav,
+    in_start = offs, in_len = len, language = lang,
+  })
+  V5.skip_pending = { guid = _item_guid(item), add = adding }
+  return launch_engine(cmd, "skip", {
+    "[panel] Python : " .. py,
+    adding and string.format("[panel] Mode   : Longer (add pauses) — " ..
+                             "%.2f s of silence into the pauses", add_s)
+           or "[panel] Mode   : Shorter (skip pauses) — cut the pauses out of a chunk",
+    "[panel] Source : " .. path,
+    string.format("[panel] Section: %.3f s + %.3f s", offs, len),
+    "[panel] Out wav: " .. wav,
+  }, true)
+end
+
+-- Swap the pause-cut wav into the chunk recorded by V5.start_skip_pauses.
+-- Same text, same speed; the item gets shorter. Returns true, or false +
+-- reason. One undo block.
+function V5.apply_skip_pauses_result(wav)
+  local p = V5.skip_pending
+  if not p then return false, "No pending pause cut." end
+  local item = _find_item_by_guid(p.guid)
+  if not item then
+    return false, "The chunk no longer exists. The cut audio is at:\n" .. wav
+  end
+  local take = reaper.GetActiveTake(item)
+  if not take then return false, "The chunk has no active take." end
+  local src = reaper.PCM_Source_CreateFromFile(wav)
+  if not src then
+    return false, "REAPER could not open the media file:\n" .. wav
+  end
+  local old_src = reaper.GetMediaItemTake_Source(take)
+  local text = V5.get_item_text(item)
+  V5.regen_undo = {
+    guid     = p.guid,
+    old_path = old_src and reaper.GetMediaSourceFileName(old_src, "") or "",
+    old_len  = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+    old_offs = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS"),
+    old_text = text,
+    new_wav  = wav,
+    new_text = text,
+  }
+  local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+  if rate <= 0 then rate = 1.0 end
+  reaper.Undo_BeginBlock()
+  reaper.PreventUIRefresh(1)
+  reaper.SetMediaItemTake_Source(take, src)
+  reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
+  local len, is_qn = reaper.GetMediaSourceLength(src)
+  if len and len > 0 and not is_qn then
+    -- The chunk keeps its speed, so the item is the new wav at that rate.
+    reaper.SetMediaItemInfo_Value(item, "D_LENGTH", len / rate)
+    V5.regen_undo.new_len = len / rate
+  end
+  reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", basename(wav), true)
+  reaper.PreventUIRefresh(-1)
+  reaper.Undo_EndBlock(p.add and "Dub chunk: add pauses"
+                              or "Dub chunk: skip pauses", -1)
+  reaper.UpdateArrange()
+  return true
+end
+
 -- ---------------------------------------------------------------------------
 -- v0.4 Track voice change — render a track, re-voice it with the ElevenLabs
 -- voice changer (speech-to-speech), import the result as a new track
@@ -6931,6 +7246,12 @@ local function render_track_stem(track, out_dir, name_base, from_s, to_s)
   -- and for the muted "Dub Rendered (ref)" track.
   local saved_mute = reaper.GetMediaTrackInfo_Value(track, "B_MUTE")
   reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
+  -- v0.29.5: same for the fader. Stems render POST-fader, so a source track
+  -- pulled down to hear only the dub rendered ~-120 dBFS of silence and
+  -- Scribe was paid to transcribe nothing. The fader is a listening choice,
+  -- not part of the source — render at unity (0 dB), restore below.
+  local saved_vol = reaper.GetMediaTrackInfo_Value(track, "D_VOL")
+  reaper.SetMediaTrackInfo_Value(track, "D_VOL", 1.0)
 
   reaper.SetOnlyTrackSelected(track)
   reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 3, true)    -- selected-track stems
@@ -6955,6 +7276,7 @@ local function render_track_stem(track, out_dir, name_base, from_s, to_s)
     reaper.GetSetProjectInfo_String(0, k, saved_str[k], true)
   end
   reaper.SetMediaTrackInfo_Value(track, "B_MUTE", saved_mute)
+  reaper.SetMediaTrackInfo_Value(track, "D_VOL", saved_vol)
   for i = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, i)
     if tr and sel[i] ~= nil then reaper.SetTrackSelected(tr, sel[i]) end
@@ -7407,6 +7729,57 @@ local function _finish_run(exit_code)
       ui_set_banner("error", "Voice recommendation failed:\n" ..
                              _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
     end
+    return
+  end
+
+  -- v0.29.5 Shorter (skip pauses) — quiet: the cut take is swapped in.
+  if _run_mode == "skip" then
+    local adding = V5.skip_pending and V5.skip_pending.add
+    if cancelled then
+      ui_set_banner("warn", adding and "Adding pauses cancelled."
+                                   or "Skipping pauses cancelled.")
+    elseif adding and m and m.status == "ok" and exit_code == 0
+           and (m.regen_wav or "") ~= "" then
+      local ok, why = V5.apply_skip_pauses_result(m.regen_wav)
+      if ok then
+        ui_set_banner("info", string.format(
+          "Silence added between the words: %s gap(s), %s s longer — same " ..
+          "words, same voice. 'Put the old one back' undoes it.",
+          m.pauses_cut ~= "" and m.pauses_cut or "?",
+          m.added_s ~= "" and m.added_s or "?"))
+      else
+        ui_set_banner("error", "The pauses were added, but the swap failed:\n"
+                               .. (why or "(unknown)"))
+      end
+    elseif adding and m and m.status == "ok" and exit_code == 0 then
+      ui_set_banner("info", "No gap between words found in this chunk — " ..
+                            "the take is unchanged. Try Slow down or " ..
+                            "Longer (add words).")
+    elseif adding then
+      ui_set_banner("error", "Adding pauses failed:\n" ..
+                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
+    elseif m and m.status == "ok" and exit_code == 0
+           and (m.regen_wav or "") ~= "" then
+      local ok, why = V5.apply_skip_pauses_result(m.regen_wav)
+      if ok then
+        ui_set_banner("info", string.format(
+          "Pauses skipped: %s pause(s) cut, %s s shorter — same words, " ..
+          "same voice. 'Put the old one back' undoes it.",
+          m.pauses_cut ~= "" and m.pauses_cut or "?",
+          m.removed_s ~= "" and m.removed_s or "?"))
+      else
+        ui_set_banner("error", "The pauses were cut, but the swap failed:\n"
+                               .. (why or "(unknown)"))
+      end
+    elseif m and m.status == "ok" and exit_code == 0 then
+      ui_set_banner("info", "No pause in this chunk is long enough to cut — " ..
+                            "the take is unchanged. Try Speed up or " ..
+                            "Shorter (fewer words).")
+    else
+      ui_set_banner("error", "Skipping pauses failed:\n" ..
+                             _error_detail(600) .. "\n\nFull log: " .. LOG_PATH)
+    end
+    V5.skip_pending = nil
     return
   end
 
@@ -7878,6 +8251,36 @@ function V5.mono_font(ctx)
   return nil
 end
 
+-- Open the feedback dialog (app_feedback.py, repo root) as its own detached
+-- window. Every report becomes an issue in the developer's inbox repo; the
+-- dialog bundles recent logs (keys scrubbed) and `log_file` — the log shown in
+-- this panel right now — so the developer sees the run the user is looking at.
+-- kind: "Feedback" | "Bug". Returns false when it could not be launched.
+function V5.open_feedback(kind, log_file)
+  local root = BASE_DIR:match("^(.*)[/\\][^/\\]*$") or BASE_DIR
+  local script = root .. SEP .. "app_feedback.py"
+  if not file_exists(script) then return false end
+  local py = project_venv_python()
+  if not file_exists(py) then py = _is_windows() and "python" or "python3" end
+  if _is_windows() then
+    if not reaper.ExecProcess then return false end
+    local cmd = '"' .. V5.pythonw(py) .. '" "' .. script .. '" --gui --app "Fast Syncs"' ..
+                ' --kind ' .. kind
+    if log_file and log_file ~= "" and file_exists(log_file) then
+      cmd = cmd .. ' --log-file "' .. log_file .. '"'
+    end
+    reaper.ExecProcess(cmd, -2)
+  else
+    local cmd = shellquote(py) .. ' ' .. shellquote(script) ..
+                ' --gui --app "Fast Syncs" --kind ' .. kind
+    if log_file and log_file ~= "" and file_exists(log_file) then
+      cmd = cmd .. ' --log-file ' .. shellquote(log_file)
+    end
+    os.execute(cmd .. ' >/dev/null 2>&1 &')
+  end
+  return true
+end
+
 local function _render_log_child(ctx, height)
   if reaper.ImGui_BeginChild(ctx, '##loglines', -1, height, _child_border_flag()) then
     local mono = V5.mono_font(ctx)
@@ -7915,6 +8318,18 @@ local function _render_log_child(ctx, height)
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, 'Open log in editor') then
     if file_exists(LOG_PATH) then open_path(LOG_PATH) end
+  end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, 'Send log to developer') then
+    V5.open_feedback("Bug", LOG_PATH)
+  end
+  if reaper.ImGui_IsItemHovered(ctx) then
+    reaper.ImGui_SetTooltip(ctx, 'Opens a report window pre-set to Bug. Your recent logs ' ..
+      'are attached (API keys removed). Add a note, press Send.')
+  end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, 'Write feedback') then
+    V5.open_feedback("Feedback", LOG_PATH)
   end
 end
 
@@ -8057,6 +8472,696 @@ function V5.select_chunk(it)
   reaper.SetEditCurPos(reaper.GetMediaItemInfo_Value(it, "D_POSITION"),
                        true, false)
   reaper.UpdateArrange()
+end
+
+-- ─── v0.29.4 chunk timing: "+4.25 s" against the English it dubs ─────────
+-- The English cues of the current run, parsed once per run folder (the SRT
+-- can be thousands of lines; this is read every frame). Same file choice and
+-- the same "English starts at project start" assumption as regen_en_under.
+function V5.regen_en_cues()
+  if _regen_out_dir == '' then return {} end
+  if V5.en_cues_dir == _regen_out_dir and V5.en_cues then return V5.en_cues end
+  local base = _regen_out_dir:match('([^\\/]+)$') or ''
+  local cues = {}
+  for _, name in ipairs({ base .. '_sync_en.srt', base .. '.srt' }) do
+    local p = _regen_out_dir .. SEP .. name
+    if file_exists(p) then cues = parse_srt_file(p); break end
+  end
+  V5.en_cues_dir, V5.en_cues = _regen_out_dir, cues
+  return cues
+end
+
+-- The English cue start this chunk belongs to. Picked ONCE per chunk (the
+-- cue it overlaps most, else the nearest start) and remembered by GUID, so
+-- the reference does not jump to a different cue while you nudge the chunk
+-- past it. Returns the cue's start, stop; nil when the run has no English SRT.
+function V5.regen_en_anchor(item)
+  V5.en_anchor = V5.en_anchor or {}
+  local key = _regen_out_dir .. '|' .. _item_guid(item)
+  local hit = V5.en_anchor[key]
+  if hit ~= nil then
+    if hit then return hit.start, hit.stop end
+    return nil
+  end
+  local pos = reaper.GetMediaItemInfo_Value(item, 'D_POSITION')
+  local len = reaper.GetMediaItemInfo_Value(item, 'D_LENGTH')
+  local best, best_ov, near, near_d = nil, 0.05, nil, math.huge
+  for _, c in ipairs(V5.regen_en_cues()) do
+    local ov = math.min(c.stop, pos + len) - math.max(c.start, pos)
+    if ov > best_ov then best, best_ov = c, ov end
+    local d = math.abs(c.start - pos)
+    if d < near_d then near, near_d = c, d end
+  end
+  local c = best or near
+  V5.en_anchor[key] = c and { start = c.start, stop = c.stop } or false
+  if c then return c.start, c.stop end
+  return nil
+end
+
+-- Move every chunk in *items* by *delta* seconds (never before 0). One undo
+-- step, like every other timeline edit in this panel.
+function V5.shift_chunks(items, delta)
+  if not items or #items == 0 or math.abs(delta) < 0.0005 then return end
+  local first = reaper.GetMediaItemInfo_Value(items[1], 'D_POSITION')
+  if first + delta < 0 then delta = -first end
+  reaper.Undo_BeginBlock()
+  reaper.PreventUIRefresh(1)
+  for _, it in ipairs(items) do
+    reaper.SetMediaItemInfo_Value(it, 'D_POSITION',
+      reaper.GetMediaItemInfo_Value(it, 'D_POSITION') + delta)
+  end
+  reaper.PreventUIRefresh(-1)
+  reaper.UpdateArrange()
+  reaper.Undo_EndBlock(string.format('Dub chunk time %+.2f s', delta), -1)
+end
+
+-- The timing row of "Redo one line": the offset against the English cue
+-- ("+4.25 s", typed or nudged) and a warning when a move made the chunk
+-- overlap a neighbour. *items* is the selection (moved together).
+function V5.chunk_time_ui(ctx, items, pos, slot, prev_it, next_it)
+  local anchor = V5.regen_en_anchor(items[1])
+  local off = anchor and (pos - anchor) or nil
+
+  if reaper.ImGui_AlignTextToFramePadding then
+    reaper.ImGui_AlignTextToFramePadding(ctx)
+  end
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.dim)
+  reaper.ImGui_Text(ctx, 'Time')
+  reaper.ImGui_PopStyleColor(ctx)
+  reaper.ImGui_SameLine(ctx, 0, 6)
+
+  -- The box shows the offset when there is an English cue to measure from,
+  -- otherwise the start in seconds. Re-seeded whenever the chunk moves or the
+  -- selection changes, unless you are typing in it.
+  local shown = off or pos
+  local seed = string.format(off and '%+.2f' or '%.2f', shown)
+  local key  = _item_guid(items[1])
+  if V5.time_buf_key ~= key or (not V5.time_buf_active
+                                 and V5.time_buf_seed ~= seed) then
+    V5.time_buf_key, V5.time_buf_seed, V5.time_buf = key, seed, seed
+  end
+  reaper.ImGui_SetNextItemWidth(ctx, 72)
+  local flags = reaper.ImGui_InputTextFlags_EnterReturnsTrue
+                and reaper.ImGui_InputTextFlags_EnterReturnsTrue() or 0
+  local enter, buf = reaper.ImGui_InputText(ctx, '##chunktime',
+                                            V5.time_buf or seed, flags)
+  if type(buf) == 'string' then V5.time_buf = buf end
+  V5.time_buf_active = reaper.ImGui_IsItemActive
+                       and reaper.ImGui_IsItemActive(ctx) or false
+  if enter then
+    local v = tonumber((tostring(V5.time_buf):gsub('[^%d%.%+%-]', '')))
+    if v then V5.shift_chunks(items, v - shown) end
+    V5.time_buf_seed = nil   -- re-seed from the moved item next frame
+  end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, V5.wrap(off
+      and string.format('Seconds this chunk starts after the English line it ' ..
+            'dubs (English at %s). Type a new value and press Enter to move ' ..
+            'the chunk — 0 puts it exactly on the English.', V5.fmt_pos(anchor))
+      or 'Start of this chunk in seconds. Type a new value and press Enter ' ..
+         'to move it. (No English SRT in the run folder, so there is no ' ..
+         'offset to show.)'))
+  end
+  reaper.ImGui_SameLine(ctx, 0, 4)
+  reaper.ImGui_Text(ctx, off and 's' or 's start')
+
+  -- Nudges: one click = one undo step.
+  for k, d in ipairs({ -0.25, -0.05, 0.05, 0.25 }) do
+    reaper.ImGui_SameLine(ctx, 0, 4)
+    if reaper.ImGui_SmallButton(ctx, string.format('%+.2f##tnudge%d', d, k)) then
+      V5.shift_chunks(items, d)
+    end
+  end
+  if off and math.abs(off) > 0.005 then
+    reaper.ImGui_SameLine(ctx, 0, 4)
+    if reaper.ImGui_SmallButton(ctx, 'to English##tzero') then
+      V5.shift_chunks(items, -off)
+    end
+  end
+
+  -- Overlap with a neighbour is what a nudge usually breaks; say so.
+  local warn = nil
+  if prev_it then
+    local pe = reaper.GetMediaItemInfo_Value(prev_it, 'D_POSITION')
+             + reaper.GetMediaItemInfo_Value(prev_it, 'D_LENGTH')
+    if pe > pos + 0.01 then
+      warn = string.format('overlaps the chunk before by %.2f s', pe - pos)
+    end
+  end
+  if next_it then
+    local ns = reaper.GetMediaItemInfo_Value(next_it, 'D_POSITION')
+    if pos + slot > ns + 0.01 then
+      warn = string.format('overlaps the chunk after by %.2f s',
+                           pos + slot - ns)
+    end
+  end
+  if warn then
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.warn)
+    reaper.ImGui_Text(ctx, warn)
+    reaper.ImGui_PopStyleColor(ctx)
+  end
+end
+
+-- ─── v0.29.4 waveform view: English above, the redo line below ───────────
+-- Two lanes over the same stretch of timeline, the way the sync view draws
+-- them: the English (from the "EN Original" track) with the line this chunk
+-- dubs shaded, and the dub chunks with the selected one in colour, a link
+-- from the English start to the chunk start, and its "+4.25 s" on it. Drag
+-- the dub lane sideways to retime the chunk (one undo step on release).
+--
+-- Peaks come from REAPER's audio accessors and are cached by everything that
+-- changes them, so the read happens when the chunk moves, not every frame.
+
+-- Every call this view needs, checked once. Missing any = no view, the rest
+-- of the tool is unaffected.
+function V5.wf_ok()
+  if V5.wf_api == nil then
+    V5.wf_api = (reaper.new_array and reaper.GetAudioAccessorSamples
+      and reaper.CreateTrackAudioAccessor and reaper.CreateTakeAudioAccessor
+      and reaper.DestroyAudioAccessor and reaper.ImGui_GetWindowDrawList
+      and reaper.ImGui_DrawList_AddLine and reaper.ImGui_DrawList_AddRectFilled
+      and reaper.ImGui_InvisibleButton and reaper.ImGui_GetCursorScreenPos
+      and reaper.ImGui_SetCursorScreenPos and reaper.ImGui_GetMousePos and reaper.ImGui_IsItemActive
+      and reaper.ImGui_GetContentRegionAvail) and true or false
+  end
+  return V5.wf_api
+end
+
+-- Peak per pixel column (0..1) of accessor *acc* over [t0, t1] (accessor
+-- time), *cols* columns wide. ~40 samples a column is plenty for a picture.
+function V5.wf_read(acc, t0, t1, cols)
+  local peaks = {}
+  cols = math.max(1, math.floor(cols))
+  local dur = t1 - t0
+  if dur <= 0 then return peaks end
+  local sr = math.max(400, math.min(8000, math.floor(cols * 40 / dur)))
+  local n = math.min(400000, math.floor(dur * sr))
+  if n < 1 then return peaks end
+  local buf = reaper.new_array(n)
+  local ok = pcall(reaper.GetAudioAccessorSamples, acc, sr, 1, t0, n, buf)
+  if not ok then return peaks end
+  local s = buf.table()
+  local per = n / cols
+  for c = 1, cols do
+    local a, b, m = math.floor((c - 1) * per) + 1, math.floor(c * per), 0
+    for i = a, math.max(a, b) do
+      local v = s[i]
+      if v then
+        if v < 0 then v = -v end
+        if v > m then m = v end
+      end
+    end
+    peaks[c] = m
+  end
+  return peaks
+end
+
+function V5.wf_cached(key, make)
+  V5.wf_cache = V5.wf_cache or {}
+  V5.wf_cache_n = V5.wf_cache_n or 0
+  local hit = V5.wf_cache[key]
+  if hit then return hit end
+  if V5.wf_cache_n > 64 then V5.wf_cache, V5.wf_cache_n = {}, 0 end
+  hit = make()
+  V5.wf_cache[key] = hit
+  V5.wf_cache_n = V5.wf_cache_n + 1
+  return hit
+end
+
+-- The English track: the newest "EN Original…" track with audio in the
+-- window, else any track named like English. nil if there is none.
+function V5.wf_en_track(t0, t1)
+  local fallback = nil
+  for t = reaper.CountTracks(0) - 1, 0, -1 do
+    local tr = reaper.GetTrack(0, t)
+    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)
+    local is_en = nm:sub(1, #TRACK_EN) == TRACK_EN
+    if is_en or nm:lower():match('english') or nm:match('^EN%f[%A]') then
+      for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
+        local it = reaper.GetTrackMediaItem(tr, i)
+        local p = reaper.GetMediaItemInfo_Value(it, 'D_POSITION')
+        local l = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH')
+        if p < t1 and p + l > t0 then
+          if is_en then return tr end
+          fallback = fallback or tr
+          break
+        end
+      end
+    end
+  end
+  return fallback
+end
+
+-- English lane peaks over [t0, t1].
+function V5.wf_en_peaks(tr, t0, t1, cols)
+  local key = string.format('en|%s|%.2f|%.2f|%d', tostring(tr), t0, t1, cols)
+  return V5.wf_cached(key, function()
+    local acc = reaper.CreateTrackAudioAccessor(tr)
+    if not acc then return {} end
+    local p = V5.wf_read(acc, t0, t1, cols)
+    reaper.DestroyAudioAccessor(acc)
+    return p
+  end)
+end
+
+-- One item's peaks over its whole length (take accessor time starts at the
+-- item start), *cols* columns wide.
+function V5.wf_item_peaks(it, cols)
+  local take = reaper.GetActiveTake(it)
+  if not take then return {} end
+  cols = math.max(1, math.floor(cols))     -- %d below needs an integer
+  local len  = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH')
+  local src  = reaper.GetMediaItemTake_Source(take)
+  local file = src and reaper.GetMediaSourceFileName(src, '') or ''
+  local key = string.format('it|%s|%s|%.3f|%.3f|%.3f|%d', _item_guid(it), file,
+    len, reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE'),
+    reaper.GetMediaItemTakeInfo_Value(take, 'D_STARTOFFS'), cols)
+  return V5.wf_cached(key, function()
+    local acc = reaper.CreateTakeAudioAccessor(take)
+    if not acc then return {} end
+    local p = V5.wf_read(acc, 0, len, cols)
+    reaper.DestroyAudioAccessor(acc)
+    return p
+  end)
+end
+
+-- Draw *peaks* as a mirrored waveform from x0, one column per pixel, centred
+-- on cy, half-height hh, scaled so the loudest peak in *norm* fills the lane.
+function V5.wf_draw(dl, peaks, x0, cy, hh, norm, col, clip_l, clip_r)
+  local ln = reaper.ImGui_DrawList_AddLine
+  for c, v in ipairs(peaks) do
+    local x = math.floor(x0 + c - 1) + 0.5
+    if x >= clip_l and x <= clip_r then
+      local h = math.max(0.5, math.min(1, v / norm) * hh)
+      ln(dl, x, cy - h, x, cy + h, col, 1)
+    end
+  end
+end
+
+function V5.wf_text(dl, x, y, col, s)
+  if reaper.ImGui_DrawList_AddText then
+    reaper.ImGui_DrawList_AddText(dl, x, y, col, s)
+  end
+end
+
+-- Where the white line is: the play position while playing or paused (bit 1
+-- / bit 2 of GetPlayState), else the edit cursor.
+function V5.cursor_time()
+  if (reaper.GetPlayState() & 3) ~= 0 then return reaper.GetPlayPosition() end
+  return reaper.GetCursorPosition()
+end
+
+-- Play / pause toggle: playing → pause, paused → resume (REAPER's pause
+-- button toggles), stopped → play from the edit cursor.
+function V5.play_pause()
+  local ps = reaper.GetPlayState()
+  if (ps & 3) ~= 0 then reaper.OnPauseButton() else reaper.OnPlayButton() end
+end
+
+-- Space bar. While this panel has keyboard focus, REAPER never sees the
+-- key, so its own Space (play/stop) does nothing — catch it here. Skipped
+-- while any widget is active, so Space still types in the text box. Called
+-- by Redo one line every frame, with or without the waveform view.
+function V5.space_play_pause(ctx)
+  if not (reaper.ImGui_IsKeyPressed and reaper.ImGui_Key_Space) then return end
+  if reaper.ImGui_IsAnyItemActive and reaper.ImGui_IsAnyItemActive(ctx) then
+    return
+  end
+  local focused = true
+  if reaper.ImGui_IsWindowFocused then
+    local fl = reaper.ImGui_FocusedFlags_RootAndChildWindows
+               and reaper.ImGui_FocusedFlags_RootAndChildWindows() or 0
+    focused = reaper.ImGui_IsWindowFocused(ctx, fl)
+  end
+  if focused and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Space(), false) then
+    V5.play_pause()
+  end
+end
+
+-- The chunk of *items* that *t* falls inside, not within 50 ms of an edge
+-- (a cut there would leave a sliver nobody can hear or click). nil if none.
+function V5.chunk_at(items, t)
+  for _, it in ipairs(items) do
+    local p = reaper.GetMediaItemInfo_Value(it, 'D_POSITION')
+    local l = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH')
+    if t > p + 0.05 and t < p + l - 0.05 then return it end
+  end
+  return nil
+end
+
+-- Split *it* at *t*, the way REAPER's own split does. The right half is a
+-- new item: it gets the same hidden line of text (SplitMediaItem may or may
+-- not carry the P_EXT across, so it is set explicitly). The left half stays
+-- selected and open. One undo step.
+function V5.cut_chunk(it, t)
+  local txt = V5.get_item_text(it)
+  reaper.Undo_BeginBlock()
+  reaper.PreventUIRefresh(1)
+  local right = reaper.SplitMediaItem(it, t)
+  if right then
+    V5.set_item_text(right, txt)
+    reaper.SetMediaItemSelected(right, false)
+  end
+  reaper.SelectAllMediaItems(0, false)
+  reaper.SetMediaItemSelected(it, true)
+  reaper.PreventUIRefresh(-1)
+  reaper.UpdateArrange()
+  reaper.Undo_EndBlock('Cut dub chunk', -1)
+  if not right then
+    ui_set_banner('error', 'Could not cut the chunk there.')
+  end
+end
+
+-- The view itself. *sel* is the selection (moved together), *idx* the first
+-- chunk's number on its track.
+function V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
+  if not V5.wf_ok() then return end
+  local item = sel[1]
+  local en0, en1 = V5.regen_en_anchor(item)
+  local drag = V5.wf_drag
+  if drag and drag.key ~= _item_guid(item) then drag, V5.wf_drag = nil, nil end
+
+  -- The stretch of timeline shown: the chunk and its English line with a
+  -- margin, slid by the scroll bar / wheel (V5.wf_pan, reset for every new
+  -- chunk). Frozen while dragging, so the picture does not slide under you.
+  local key = _item_guid(item)
+  if not V5.wf_pan or V5.wf_pan.key ~= key then
+    V5.wf_pan = { key = key, shift = 0 }
+  end
+  -- v0.29.4 zoom: V5.wf_zoom (1 = fit the chunk and its English; kept while
+  -- you step from chunk to chunk). wf_pan.shift = how far the view centre
+  -- sits from the chunk's centre, in seconds.
+  V5.wf_zoom = V5.wf_zoom or 1
+  local view
+  if drag then
+    view = drag.view
+  else
+    local a = math.min(pos, en0 or pos)
+    local b = math.max(pos + slot, en1 or 0)
+    local base0 = math.max(0, a - 1.5)
+    local c     = (base0 + b + 1.5) * 0.5
+    local span  = math.max(0.5, math.min(600,
+                    ((b + 1.5) - base0) / V5.wf_zoom))
+    -- Snapped to 0.05 s so scrolling re-reads the English peaks in steps,
+    -- not on every pixel.
+    local s_max = math.max(0, reaper.GetProjectLength(0) - span)
+    local s0 = c + V5.wf_pan.shift - span * 0.5
+    s0 = math.max(0, math.min(math.max(s_max, base0),
+                              math.floor(s0 * 20 + 0.5) / 20))
+    V5.wf_pan.shift = s0 + span * 0.5 - c
+    view = { t0 = s0, t1 = s0 + span, c = c, fit = (b + 1.5) - base0 }
+  end
+  local t0, t1 = view.t0, view.t1
+
+  -- Zoom by *f* (>1 = in) keeping the time at fraction *frac* of the view
+  -- where it is — the mouse for Ctrl+wheel, the middle for the buttons.
+  local function zoom_by(f, frac)
+    if drag or not view.c then return end
+    local z = math.max(0.002, math.min(200, V5.wf_zoom * f))
+    local span  = t1 - t0
+    local span2 = math.max(0.5, math.min(600, view.fit / z))
+    local tm = t0 + span * frac
+    local n0 = tm - span2 * frac
+    V5.wf_zoom = view.fit / span2
+    V5.wf_pan.shift = (n0 + span2 * 0.5) - view.c
+  end
+
+  local W  = math.max(200, math.floor((reaper.ImGui_GetContentRegionAvail(ctx)) or 400))
+  local LH, GAP = 46, 18                     -- lane height, link strip
+  local H  = LH * 2 + GAP
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+  local pps = W / (t1 - t0)
+  local function X(t) return x0 + (t - t0) * pps end
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local fill = reaper.ImGui_DrawList_AddRectFilled
+  local ln   = reaper.ImGui_DrawList_AddLine
+  local box  = reaper.ImGui_DrawList_AddRect
+  local xr = x0 + W
+  local ey, dy = y0, y0 + LH + GAP           -- lane tops
+
+  -- Lane backgrounds.
+  fill(dl, x0, ey, xr, ey + LH, 0x15181DFF)
+  fill(dl, x0, dy, xr, dy + LH, 0x15181DFF)
+
+  -- English lane: the line this chunk dubs shaded, then the audio.
+  if en0 then
+    fill(dl, math.max(x0, X(en0)), ey, math.min(xr, X(en1)), ey + LH, 0x2A2F4AFF)
+  end
+  local en_tr = V5.wf_en_track(t0, t1)
+  if en_tr then
+    local p = V5.wf_en_peaks(en_tr, t0, t1, W)
+    local m = 0.05
+    for _, v in ipairs(p) do if v > m then m = v end end
+    V5.wf_draw(dl, p, x0, ey + LH * 0.5, LH * 0.5 - 4, m, 0x8F9BD8FF, x0, xr)
+  else
+    V5.wf_text(dl, x0 + 70, ey + LH * 0.5 - 7, 0x8A93A0FF,
+               'no "' .. TRACK_EN .. '" track with audio here')
+  end
+  V5.wf_text(dl, x0 + 6, ey + 3, 0xC9D1DBFF, 'English')
+
+  -- Dub lane: neighbours dim, the selection in colour (shifted while dragged).
+  local delta = 0
+  if drag then
+    local mx = reaper.ImGui_GetMousePos(ctx)
+    delta = (mx - drag.mx) / pps
+    if pos + delta < 0 then delta = -pos end
+  end
+  local is_sel = {}
+  for _, it in ipairs(sel) do is_sel[it] = true end
+  local tr = reaper.GetMediaItem_Track(item)
+  local all = {}
+  for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
+    local it = reaper.GetTrackMediaItem(tr, i)
+    local p = reaper.GetMediaItemInfo_Value(it, 'D_POSITION')
+    local l = reaper.GetMediaItemInfo_Value(it, 'D_LENGTH')
+    if is_sel[it] then p = p + delta end
+    if p < t1 and p + l > t0 then all[#all + 1] = { it = it, p = p, l = l } end
+  end
+  local peaks, m = {}, 0.05
+  for k, e in ipairs(all) do
+    peaks[k] = V5.wf_item_peaks(e.it, math.max(1, e.l * pps))
+    for _, v in ipairs(peaks[k]) do if v > m then m = v end end
+  end
+  for k, e in ipairs(all) do
+    local sx, ex = X(e.p), X(e.p + e.l)
+    local hot = is_sel[e.it]
+    fill(dl, math.max(x0, sx), dy + 1, math.min(xr, ex), dy + LH - 1,
+         hot and 0x2B2547FF or 0x1D2026FF)
+    V5.wf_draw(dl, peaks[k], sx, dy + LH * 0.5, LH * 0.5 - 5, m,
+               hot and 0xB4A6FFFF or 0x5A6170FF, x0, xr)
+    if hot and box then
+      box(dl, math.max(x0, sx), dy + 1, math.min(xr, ex), dy + LH - 1,
+          0x9C8CFFFF)
+    end
+  end
+  V5.wf_text(dl, x0 + 6, dy + LH - 16, 0xC9D1DBFF, 'Redo line')
+
+  -- Link from the English start to the chunk start, and the offset on it.
+  local start = pos + delta
+  if en0 then
+    ln(dl, X(en0), ey + LH, X(start), dy, 0xE0565BFF, 1.5)
+    local off = start - en0
+    V5.wf_text(dl, math.max(x0 + 2, X(start)) + 4, dy + 3, 0xFFFFFFFF,
+               string.format('%d  %+.2f s', idx or 0, off))
+  else
+    V5.wf_text(dl, math.max(x0 + 2, X(start)) + 4, dy + 3, 0xFFFFFFFF,
+               tostring(idx or 0))
+  end
+
+  -- REAPER's play / edit cursor across both lanes, so listening lines up.
+  local cur = V5.cursor_time()
+  if cur >= t0 and cur <= t1 then
+    ln(dl, X(cur), ey, X(cur), dy + LH, 0xF2F2F2C0, 1)
+  end
+
+  -- Horizontal scroll bar under the lanes: the whole project is the track,
+  -- the thumb is the stretch on screen. Drawn here, driven further down.
+  local SB = 10
+  local sy = y0 + H + 4
+  local total = math.max(reaper.GetProjectLength(0), t1, 0.001)
+  local th_w = math.max(24, (t1 - t0) / total * W)
+  local th_x = math.max(x0, math.min(xr - th_w, x0 + t0 / total * W))
+  fill(dl, x0, sy, xr, sy + SB, 0x1B1E23FF)
+  local sc = V5.wf_scroll_drag and 0x8A93A0FF or 0x4A515CFF
+  fill(dl, th_x, sy + 1, th_x + th_w, sy + SB - 1, sc)
+
+  -- Time at both edges.
+  V5.wf_text(dl, x0 + 2,  sy + SB + 2, 0x6E7682FF, V5.fmt_pos(t0))
+  local rt = V5.fmt_pos(t1)
+  local rw = reaper.ImGui_CalcTextSize and reaper.ImGui_CalcTextSize(ctx, rt) or 70
+  V5.wf_text(dl, xr - rw - 2, sy + SB + 2, 0x6E7682FF, rt)
+
+  -- Interaction. English lane: click = put the edit cursor there.
+  reaper.ImGui_InvisibleButton(ctx, '##wfen', W, LH + GAP)
+  if reaper.ImGui_IsItemClicked and reaper.ImGui_IsItemClicked(ctx) then
+    local mx = reaper.ImGui_GetMousePos(ctx)
+    reaper.SetEditCurPos(t0 + (mx - x0) / pps, false, false)
+  end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, 'Click to put the edit cursor here.')
+  end
+  -- Dub lane: drag sideways = move the chunk; let go = one undo step.
+  reaper.ImGui_SetCursorScreenPos(ctx, x0, dy)
+  reaper.ImGui_InvisibleButton(ctx, '##wfdub', W, LH)
+  local active = reaper.ImGui_IsItemActive(ctx)
+  if active and not drag then
+    local mx = reaper.ImGui_GetMousePos(ctx)
+    V5.wf_drag = { key = _item_guid(item), mx = mx, view = view }
+  elseif not active and drag then
+    V5.wf_drag = nil
+    if math.abs(delta * pps) >= 3 then
+      V5.shift_chunks(sel, delta)
+    else
+      -- A click, not a drag: open the chunk under the mouse (its dubbed line
+      -- loads into the text box below, as if picked in the arrange view).
+      -- On the chunk that is already open, it places the edit cursor there
+      -- instead — that is where "Cut" will split it.
+      local mx = reaper.ImGui_GetMousePos(ctx)
+      local t = t0 + (mx - x0) / pps
+      for _, e in ipairs(all) do
+        if t >= e.p and t <= e.p + e.l then
+          if is_sel[e.it] then
+            reaper.SetEditCurPos(t, false, false)
+          else
+            V5.select_chunk(e.it)
+          end
+          break
+        end
+      end
+    end
+  end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip and not drag then
+    -- Over a grey chunk: its dubbed line, so you can tell which one to open.
+    local mx = reaper.ImGui_GetMousePos(ctx)
+    local t = t0 + (mx - x0) / pps
+    local tip = nil
+    for _, e in ipairs(all) do
+      if not is_sel[e.it] and t >= e.p and t <= e.p + e.l then
+        local s = V5.get_item_text(e.it)
+        tip = V5.wrap(s ~= '' and s or '(no text stored on that item)') ..
+              '\n\nClick to open this chunk.'
+        break
+      end
+    end
+    reaper.ImGui_SetTooltip(ctx, tip or V5.wrap('Drag sideways to move ' ..
+      'this chunk against the English (one undo step). Click on it to put ' ..
+      'the cut line there. Click a grey chunk to open it.'))
+  end
+
+  -- Scroll bar: drag the thumb (or anywhere on the bar) to slide the view.
+  reaper.ImGui_SetCursorScreenPos(ctx, x0, sy)
+  reaper.ImGui_InvisibleButton(ctx, '##wfscroll', W, SB)
+  if reaper.ImGui_IsItemActive(ctx) then
+    local mx = reaper.ImGui_GetMousePos(ctx)
+    local sd = V5.wf_scroll_drag
+    if not sd then
+      -- Pressed off the thumb: jump so the thumb centres on the mouse first.
+      if mx < th_x or mx > th_x + th_w then
+        V5.wf_pan.shift = V5.wf_pan.shift
+                          + (mx - (th_x + th_w * 0.5)) * total / W
+      end
+      V5.wf_scroll_drag = { mx = mx, shift = V5.wf_pan.shift }
+    else
+      V5.wf_pan.shift = sd.shift + (mx - sd.mx) * total / W
+    end
+  else
+    V5.wf_scroll_drag = nil
+  end
+
+  -- Mouse wheel over the view: sideways wheel / trackpad, or Shift+wheel,
+  -- slides it by a fifth of its width.
+  if reaper.ImGui_GetMouseWheel and not drag then
+    local mx, my = reaper.ImGui_GetMousePos(ctx)
+    if mx >= x0 and mx <= xr and my >= y0 and my <= sy + SB then
+      local wv, wh = reaper.ImGui_GetMouseWheel(ctx)
+      wv, wh = wv or 0, wh or 0
+      local mods = reaper.ImGui_GetKeyMods and reaper.ImGui_GetKeyMods(ctx) or 0
+      local shift = (reaper.ImGui_Mod_Shift and reaper.ImGui_Mod_Shift())
+                    or (reaper.ImGui_KeyModFlags_Shift
+                        and reaper.ImGui_KeyModFlags_Shift()) or 0
+      local ctrl = (reaper.ImGui_Mod_Ctrl and reaper.ImGui_Mod_Ctrl())
+                   or (reaper.ImGui_KeyModFlags_Ctrl
+                       and reaper.ImGui_KeyModFlags_Ctrl()) or 0
+      if ctrl ~= 0 and (mods & ctrl) ~= 0 and wv ~= 0 then
+        -- Ctrl+wheel: zoom around the mouse.
+        zoom_by(1.25 ^ wv, (mx - x0) / W)
+        wv = 0
+      end
+      if wh == 0 and shift ~= 0 and (mods & shift) ~= 0 then wh = wv end
+      if wh ~= 0 then
+        V5.wf_pan.shift = V5.wf_pan.shift - wh * (t1 - t0) * 0.2
+      end
+    end
+  end
+  reaper.ImGui_Dummy(ctx, W, 16)             -- room for the edge times
+
+  -- Listen to the pair.
+  if reaper.ImGui_SmallButton(ctx, '▶ Play from the English##wfplay') then
+    reaper.SetEditCurPos(math.max(0, math.min(en0 or pos, pos) - 0.3),
+                         false, false)
+    reaper.OnPlayButton()
+  end
+  reaper.ImGui_SameLine(ctx, 0, 4)
+  -- Play / pause in one button (and on Space, below): pause resumes from
+  -- where it stopped; stopped plays from the white line.
+  local ps = reaper.GetPlayState()
+  local pp = ((ps & 2) == 2 and '▶ Resume') or ((ps & 1) == 1 and '|| Pause')
+             or '▶ Play'
+  if reaper.ImGui_SmallButton(ctx, pp .. '##wfpause') then V5.play_pause() end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, 'Space does the same while this panel has ' ..
+                                 'focus (not while typing in a text box).')
+  end
+
+  reaper.ImGui_SameLine(ctx, 0, 4)
+  if reaper.ImGui_SmallButton(ctx, '■ Stop##wfstop') then
+    reaper.OnStopButton()
+  end
+
+  -- Cut: split the open chunk at the white line (play position while playing
+  -- or paused, else the edit cursor). Only offered when the line is inside it.
+  reaper.ImGui_SameLine(ctx, 0, 10)
+  local cut_t = V5.cursor_time()
+  local cut_it = V5.chunk_at(sel, cut_t)
+  _ui_begin_disabled(ctx, cut_it == nil)
+  if reaper.ImGui_SmallButton(ctx, '✂ Cut##wfcut') and cut_it then
+    V5.cut_chunk(cut_it, cut_t)
+  end
+  _ui_end_disabled(ctx)
+  if reaper.ImGui_IsItemHovered and reaper.ImGui_SetTooltip
+     and reaper.ImGui_IsItemHovered(ctx,
+           reaper.ImGui_HoveredFlags_AllowWhenDisabled
+           and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0) then
+    reaper.ImGui_SetTooltip(ctx, V5.wrap(cut_it
+      and string.format('Split this chunk in two at %s (the white line). ' ..
+            'Both halves keep the full line of text — edit each half\'s ' ..
+            'text before you regenerate it. One undo step.',
+            V5.fmt_pos(cut_t))
+      or 'Put the white line inside the open chunk first: click on it in ' ..
+         'the Redo line lane, or pause playback there.'))
+  end
+  -- Zoom: buttons zoom around the middle of the view; Ctrl+wheel around the
+  -- mouse. Fit = back to the chunk and its English line, centred.
+  reaper.ImGui_SameLine(ctx, 0, 10)
+  if reaper.ImGui_SmallButton(ctx, 'Zoom -##wfzout') then zoom_by(1 / 1.5, 0.5) end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, 'Zoom out (or Ctrl+mouse wheel over the waveform).')
+  end
+  reaper.ImGui_SameLine(ctx, 0, 4)
+  if reaper.ImGui_SmallButton(ctx, 'Zoom +##wfzin') then zoom_by(1.5, 0.5) end
+  if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+    reaper.ImGui_SetTooltip(ctx, 'Zoom in (or Ctrl+mouse wheel over the waveform).')
+  end
+  if math.abs(V5.wf_zoom - 1) > 0.01 or (V5.wf_pan.shift or 0) ~= 0 then
+    reaper.ImGui_SameLine(ctx, 0, 4)
+    if reaper.ImGui_SmallButton(ctx, 'Fit##wffit') then
+      V5.wf_zoom, V5.wf_pan.shift = 1, 0
+    end
+    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, 'Back to this chunk and its English line, ' ..
+                                   'zoom reset.')
+    end
+  end
 end
 
 -- One neighbouring line, dim and one row tall. Its job is to remind you what
@@ -8375,15 +9480,76 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
     end
   end
   for k, q in ipairs(V5.ASSIST_QUICK) do
-    local w = V5.btn_w(ctx, q[1])
-    V5.wrap_next(ctx, w)
-    _ui_begin_disabled(ctx, busy)
-    if reaper.ImGui_Button(ctx, q[1] .. '##rgaq' .. k, w, 0) and not busy then
-      ask(q[2])
-    end
-    _ui_end_disabled(ctx)
-    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
+    if q.add_audio then
+      -- v0.29.7: silence into this chunk's pauses, sized to fill the room
+      -- before the next chunk (0.08 s kept clear); the last chunk on the
+      -- track gets the engine default (0.3 s per pause).
+      local one = #items == 1
+      local room = next_it and (gap - 0.08) or 0
+      local can = one and (not next_it or room >= 0.1)
+      local label = (V5.quiet_job == 'skip' and V5.skip_pending
+                     and V5.skip_pending.add) and '… Adding pauses' or q[1]
+      local w = V5.btn_w(ctx, label)
+      V5.wrap_next(ctx, w)
+      _ui_begin_disabled(ctx, busy or not can)
+      if reaper.ImGui_Button(ctx, label .. '##rgaq' .. k, w, 0)
+         and not busy and can then
+        V5.start_skip_pauses(item, room)
+      end
+      _ui_end_disabled(ctx)
+      if reaper.ImGui_IsItemHovered(ctx,
+           reaper.ImGui_HoveredFlags_AllowWhenDisabled
+           and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0)
+         and reaper.ImGui_SetTooltip then
+        reaper.ImGui_SetTooltip(ctx, V5.wrap(
+          not one and 'Select ONE chunk — silence is added take by take.'
+          or not can and ('No room: the next chunk starts right after this ' ..
+                          'one. Move it, or try Slow down.')
+          or next_it and string.format(
+               'Put %.2f s of silence between the words of this chunk\'s ' ..
+               'audio (pauses get twice a word gap\'s share), so it fills ' ..
+               'the gap before the next chunk: same words, same voice, no ' ..
+               'credits. The start stays where it is. "Put the old one ' ..
+               'back" undoes it.', room)
+          or ('Put silence between the words of this chunk\'s audio (0.12 s ' ..
+              'per word gap, 0.3 s per pause): same words, same voice, no ' ..
+              'credits. "Put the old one back" undoes it.')))
+      end
+    elseif q.skip_audio then
+      -- v0.29.5: cut the pauses out of this chunk's audio (one chunk only:
+      -- each selected chunk is its own take).
+      local one = #items == 1
+      local label = V5.quiet_job == 'skip' and '… Skipping pauses' or q[1]
+      local w = V5.btn_w(ctx, label)
+      V5.wrap_next(ctx, w)
+      _ui_begin_disabled(ctx, busy or not one)
+      if reaper.ImGui_Button(ctx, label .. '##rgaq' .. k, w, 0)
+         and not busy and one then
+        V5.start_skip_pauses(item)
+      end
+      _ui_end_disabled(ctx)
+      if reaper.ImGui_IsItemHovered(ctx,
+           reaper.ImGui_HoveredFlags_AllowWhenDisabled
+           and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0)
+         and reaper.ImGui_SetTooltip then
+        reaper.ImGui_SetTooltip(ctx, V5.wrap(one
+          and ('Cut the silent stretches out of this chunk\'s audio and ' ..
+               'join the speech: same words, same voice, no credits. The ' ..
+               'start stays where it is; the chunk just gets shorter. "Put ' ..
+               'the old one back" undoes it.')
+          or 'Select ONE chunk — the pauses are cut take by take.'))
+      end
+    else
+      local w = V5.btn_w(ctx, q[1])
+      V5.wrap_next(ctx, w)
+      _ui_begin_disabled(ctx, busy)
+      if reaper.ImGui_Button(ctx, q[1] .. '##rgaq' .. k, w, 0) and not busy then
+        ask(q[2])
+      end
+      _ui_end_disabled(ctx)
+      if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+        reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
+      end
     end
   end
   V5.wrap_end()
@@ -8604,6 +9770,25 @@ local function ui_regen_section(ctx)
   V5.hint(ctx, 'Move to the chunk before or after this one — the arrange ' ..
                'view follows. A line you typed but did not regenerate is ' ..
                'dropped, exactly as it is when you click another item.')
+
+  -- Edit time: offset against the English ("+4.25 s"), typed or nudged.
+  V5.chunk_time_ui(ctx, sel, pos, slot, prev_it, next_it)
+  -- ...and the two waveforms it is measured between, behind a toggle that
+  -- REAPER remembers across sessions (ext state, persisted).
+  if V5.wf_show == nil then
+    V5.wf_show = reaper.GetExtState('dub_pipeline', 'wf_show') ~= '0'
+  end
+  local wf_rv, wf_on = reaper.ImGui_Checkbox(ctx, 'Show waveform##wfshow',
+                                             V5.wf_show)
+  if wf_rv then
+    V5.wf_show = wf_on
+    reaper.SetExtState('dub_pipeline', 'wf_show', wf_on and '1' or '0', true)
+  end
+  if V5.wf_show then
+    reaper.ImGui_Dummy(ctx, 0, 2)
+    V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
+  end
+  V5.space_play_pause(ctx)   -- Space works with the view hidden too
 
   reaper.ImGui_Dummy(ctx, 0, 4)
   V5.chunk_neighbour(ctx, prev_it, '↑')
@@ -10069,10 +11254,14 @@ V5.REVIEW_PX_OPTS  = { 13, 15, 17 }
 -- short canvas → tall reserve, forever). Width is an input here, not an
 -- output, so this answer is stable.
 V5.REVIEW_BAR_W = { 110, 200, 100, 120, 120 }   -- Save / Continue / Skip / Back / note
+-- v0.29.6: AI · test rules adds the speed-up checkbox before the note.
+V5.REVIEW_SPEEDUP_W = 236
+V5.REVIEW_BAR_W_TEST = { 110, 200, 100, 120, V5.REVIEW_SPEEDUP_W, 120 }
 
 function V5.review_bot_h(avail)
   local rows, pen = 1, 0
-  for _, w in ipairs(V5.REVIEW_BAR_W) do
+  for _, w in ipairs(SCRIPT_MODE == 'ai_test' and V5.REVIEW_BAR_W_TEST
+                     or V5.REVIEW_BAR_W) do
     if pen == 0 then pen = w
     elseif pen + 8 + w <= avail then pen = pen + 8 + w
     else rows, pen = rows + 1, w end
@@ -11732,19 +12921,26 @@ V5.ASSIST_QUICK = {
     'adding natural pauses where a speaker would breathe: commas at clause ' ..
     'breaks, a dash or three dots (...) before an important phrase, and a ' ..
     'full stop between two thoughts. Never inside a name or a number. Give ' ..
-    '2-3 alternatives with a different amount of pausing.' },
+    '2-3 alternatives with a different amount of pausing.',
+    -- v0.29.7: on the Regenerate tab this puts silence INTO the take's
+    -- pauses (add_audio); the review screen still asks for the text.
+    add_audio = true },
   { 'Shorter (fewer words)',
     'Shorten the length by changing or using fewer words: give 2-3 shorter ' ..
     'renderings that fit the slot. Drop filler and repetition before ' ..
     'meaning; use shorter synonyms; keep every name and number.' },
   -- v0.21.1 Remove pauses, now framed as a way to shorten: same words, one
   -- continuous flow, so the voice does not stop mid-line.
+  -- v0.29.5: on the Regenerate tab (where the line HAS audio) this button
+  -- cuts the silent stretches out of the take itself — skip_audio below;
+  -- the review screen, before any audio exists, still asks for the text.
   { 'Shorter (skip pauses)',
     'Shorten the length by skipping pauses: keep the SAME words, meaning, ' ..
     'names and numbers. Remove pause-causing punctuation inside the line ' ..
     '(commas, dashes, three dots, semicolons, full stops between clauses) ' ..
     'and join short sentences so it is spoken in ONE continuous flow. ' ..
-    'Keep only the final full stop. Give 2-3 alternatives.' },
+    'Keep only the final full stop. Give 2-3 alternatives.',
+    skip_audio = true },
   { 'Alternatives', 'Give me 3 alternative renderings of this line.' },
 }
 
@@ -12101,6 +13297,12 @@ local function ui_phase_review(ctx)
 
   V5.wrap_next(ctx, 120)
   if reaper.ImGui_Button(ctx, 'Back to setup', 120, 30) then act = 'back' end
+
+  -- v0.29.6: the last say on speeding up long pieces, before Continue spends.
+  if SCRIPT_MODE == 'ai_test' then
+    V5.wrap_next(ctx, V5.REVIEW_SPEEDUP_W)
+    V5.speedup_check(ctx, true)
+  end
 
   local over_n = (R.counts and R.counts.over) or 0
   local note = (R.dirty or (R.cast and R.cast.dirty))
@@ -13542,7 +14744,7 @@ function V5.ui_source_inputs(ctx)
   -- a second entrance.
   V5.fcell(ctx)
   V5.fld(ctx, 'Script', 'Where the translated script comes from.', 0)
-  local mode = V5.segmented(ctx, 'scriptmode', SCRIPT_MODE, {
+  local script_opts = {
     { 'auto', 'Prompt chain',
       'The engine transcribes the audio and runs the LLM translation ' ..
       'chain (Step 1 translate, Step 2 review, Step 3 punctuation prompts) ' ..
@@ -13582,7 +14784,15 @@ function V5.ui_source_inputs(ctx)
       'Paste your own translated script. The audio is still transcribed ' ..
       'once, because the sync stages need its timings, but the LLM ' ..
       'translation chain is skipped.' },
-  })
+  }
+  -- v0.30: drop the hidden "AI · learns" button (V5.AI_LEARNS_ON). By value,
+  -- not index, so reordering the list above cannot remove the wrong one.
+  if not V5.AI_LEARNS_ON then
+    for i = #script_opts, 1, -1 do
+      if script_opts[i][1] == 'ai' then table.remove(script_opts, i) end
+    end
+  end
+  local mode = V5.segmented(ctx, 'scriptmode', SCRIPT_MODE, script_opts)
   if mode ~= SCRIPT_MODE then
     SCRIPT_MODE = mode
     save_settings()
@@ -13700,6 +14910,11 @@ function V5.ui_source_inputs(ctx)
           'learned style. Nothing is learned from this run, and all files ' ..
           'go to <audio>_TEST; tracks import as [TEST] beside your normal ' ..
           'dub for comparison.')
+        -- v0.29.6: decided here, before the dub step spends anything.
+        reaper.ImGui_Dummy(ctx, 0, 6)
+        reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.text)
+        V5.speedup_check(ctx, false)
+        reaper.ImGui_PopStyleColor(ctx)
       end
       if SCRIPT_MODE == 'ai' then
         reaper.ImGui_Dummy(ctx, 0, 6)
@@ -14423,6 +15638,61 @@ function V5.pane_about(ctx)
     _grey_hint(ctx, 'The check needs curl and access to raw.githubusercontent' ..
                     '.com. It failing does not affect anything else — the ' ..
                     'updater itself still works.')
+  end
+
+  V5.about_rollback(ctx)
+end
+
+-- v0.30: the roll back row under the update buttons — a dropdown of every
+-- published release and a "Roll back…" button (see V5.run_rollback).
+function V5.about_rollback(ctx)
+  reaper.ImGui_Dummy(ctx, 0, 14)
+  reaper.ImGui_Text(ctx, 'Roll back to an earlier version')
+  reaper.ImGui_Dummy(ctx, 0, 2)
+
+  -- First look at this pane fetches the list; after that only Refresh does.
+  if V5.rel.state == 'idle' then V5.fetch_releases() end
+
+  if V5.rel.state == 'loading' then
+    _grey_hint(ctx, 'Loading the list of versions from GitHub…')
+    return
+  end
+  if V5.rel.state == 'failed' then
+    _grey_hint(ctx, 'Could not load the list of versions (needs curl and ' ..
+                    'access to api.github.com).')
+    if reaper.ImGui_Button(ctx, 'Try again', 110, 24) then V5.fetch_releases() end
+    return
+  end
+
+  local opts = {}
+  for _, v in ipairs(V5.rel.list) do
+    local tag = (v == V5.APP_VERSION) and '   (installed)' or ''
+    opts[#opts + 1] = { v, 'v' .. v .. tag }
+  end
+  V5.rel.pick = V5.dropdown(ctx, 'rollback', V5.rel.pick or '', opts, 190)
+  if V5.rel.pick == '' then V5.rel.pick = nil end
+
+  local pick  = V5.rel.pick
+  local same  = (pick == nil) or (pick == V5.APP_VERSION)
+  local older = pick and V5.ver_cmp(pick, V5.APP_VERSION) < 0
+  reaper.ImGui_SameLine(ctx)
+  _ui_begin_disabled(ctx, same)
+  if reaper.ImGui_Button(ctx, older ~= false and 'Roll back...' or 'Install...',
+                         150, 0) and not same then
+    V5.run_rollback(pick)
+  end
+  _ui_end_disabled(ctx)
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, 'Refresh##relrefresh', 80, 0) then
+    V5.fetch_releases()
+  end
+
+  V5.hint(ctx, 'Installs the chosen release in place of this one — for when ' ..
+               'an update broke something. Settings, keys, venvs and AI ' ..
+               'memory are kept. Re-install latest brings you back.')
+  if V5.pinned_version() ~= '' and V5.pinned_version() == V5.APP_VERSION then
+    _grey_hint(ctx, 'You rolled back to v' .. V5.APP_VERSION .. ', so the ' ..
+                    '"update available" dialog stays quiet at launch.')
   end
 end
 
@@ -16045,6 +17315,8 @@ local function main()
       if V5.SYNC then V5.SYNC.poll() end
       -- v0.16: the launch version check, and the one dialog it may raise.
       V5.poll_update()
+      -- v0.30: the release list for Settings → About's roll back dropdown.
+      V5.poll_releases()
       -- v0.17: the Connections key probes. Outside the screen switch on
       -- purpose — a probe fired from Settings has to finish even if you walk
       -- away to the Dub screen while curl is still out.

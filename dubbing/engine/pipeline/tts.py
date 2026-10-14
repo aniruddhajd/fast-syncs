@@ -35,7 +35,8 @@ import urllib.request
 import uuid
 from typing import Dict, List
 
-from .config import (_urlopen, ELEVENLABS_CHUNK_CHARS, ELEVENLABS_TTS_MODEL,
+from .config import (_urlopen, ELEVENLABS_CHUNK_CHARS,
+                     ELEVENLABS_TTS_CONCURRENCY, ELEVENLABS_TTS_MODEL,
                      ELEVENLABS_TTS_VOICE_ID, CONFIG_DIR, PYDUB_AVAILABLE,
                      TTS_DEFAULT_LANGUAGE, TTS_DEFAULT_VOICE, TTS_LANGUAGES,
                      TTS_MAX_BYTES, _AudioSegment, _strip_emotion_tags,
@@ -1332,6 +1333,12 @@ def synthesize_sentences_elevenlabs(sentences, output_path: str,
     spans = [None] * len(sentences)
     cursor = 0
 
+    # v0.29.4: build every request first, then send them
+    # ELEVENLABS_TTS_CONCURRENCY at a time. Each stretch's prosody context is
+    # the neighbouring TEXT (previous_text / next_text), never the previous
+    # reply, so the requests do not depend on each other. The replies are
+    # assembled below in the original order, exactly as the serial loop did.
+    jobs = []
     for gi, group in enumerate(groups):
         text = " ".join(sentences[i] for i in group)
         offsets, pos = [], 0
@@ -1350,17 +1357,44 @@ def synthesize_sentences_elevenlabs(sentences, output_path: str,
                 prev_ctx = None
             if nxt_i < len(sentences) and sent_voices[nxt_i] != grp_voice:
                 next_ctx = None
+        jobs.append((text, offsets, grp_voice, prev_ctx, next_ctx))
 
+    def _fetch(gi):
+        text, _offsets, grp_voice, prev_ctx, next_ctx = jobs[gi]
         if status_cb:
             status_cb(f"TTS: stretch {gi + 1} of {len(groups)} "
-                      f"({len(group)} sentence(s), {len(text)} chars"
+                      f"({len(groups[gi])} sentence(s), {len(text)} chars"
                       + (f", voice {grp_voice}" if sent_voices else "")
                       + ")…")
-        audio, chars, starts, ends = _elevenlabs_tts_post_ts(
+        reply = _elevenlabs_tts_post_ts(
             text, api_key, grp_voice, model_id,
             previous_text=prev_ctx, next_text=next_ctx)
         with open(f"{out_base}_str_{gi + 1:03d}.mp3", "wb") as sf:
-            sf.write(audio)
+            sf.write(reply[0])
+        return reply
+
+    workers = max(1, min(ELEVENLABS_TTS_CONCURRENCY, len(jobs)))
+    if workers == 1:
+        replies = [_fetch(gi) for gi in range(len(jobs))]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        if status_cb:
+            status_cb(f"TTS: {len(jobs)} stretch(es), {workers} at a time…")
+        ex = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = [ex.submit(_fetch, gi) for gi in range(len(jobs))]
+            # .result() in order: the first failure raises here, as the
+            # serial loop did, and the rest are cancelled below.
+            replies = [f.result() for f in futures]
+        except BaseException:
+            ex.shutdown(wait=True, cancel_futures=True)
+            raise
+        ex.shutdown(wait=True)
+
+    for gi, group in enumerate(groups):
+        text, offsets = jobs[gi][0], jobs[gi][1]
+        grp_voice = jobs[gi][2]
+        audio, chars, starts, ends = replies[gi]
         try:
             seg = AudioSegment.from_file(io.BytesIO(audio), format="mp3")
         except FileNotFoundError:

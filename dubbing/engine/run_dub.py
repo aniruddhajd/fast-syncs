@@ -310,6 +310,54 @@ def _report_arg_error(argv, message, exit_code=2):
     return exit_code
 
 
+class _StepTimer:
+    """v0.29.4: wall-clock time per step of a run, from the log lines alone.
+
+    A step starts at the first line of a new stage tag ([S1a], [S2d] …) or of
+    one of the AI agents' own phases, and ends where the next one starts. The
+    engine prints no timestamps, so without this a slow run gave no hint of
+    which part was slow."""
+
+    _TAG = re.compile(r"^\[(S\d+[a-z]?)\]\s*(.*)")
+    _AGENT = re.compile(r"^\[engine\] (Importing|Checking the LLM|Translator|"
+                        r"Repair|Critic panel|Proofer)")
+
+    def __init__(self):
+        import time
+        self._now = time.monotonic
+        self.t0 = self._now()
+        self.steps = [("startup", self.t0)]   # (label, start time)
+        self.key = "startup"
+
+    def see(self, line):
+        m = self._TAG.match(line)
+        if m:
+            key, label = m.group(1), f"[{m.group(1)}] {m.group(2)}"
+        else:
+            m = self._AGENT.match(line)
+            if not m:
+                return
+            key, label = m.group(1), line.strip()
+        if key == self.key:
+            return
+        self.key = key
+        self.steps.append((label, self._now()))
+
+    def report(self):
+        end = self._now()
+
+        def fmt(s):
+            s = int(round(s))
+            return f"{s // 60}m {s % 60:02d}s" if s >= 60 else f"{s}s"
+
+        out = [f"[run_dub] Timing — total {fmt(end - self.t0)}:"]
+        for k, (label, t) in enumerate(self.steps):
+            nxt = self.steps[k + 1][1] if k + 1 < len(self.steps) else end
+            short = label if len(label) <= 70 else label[:69] + "…"
+            out.append(f"[run_dub]   {fmt(nxt - t):>7}  {short}")
+        return "\n".join(out) + "\n"
+
+
 def _parse_args(argv):
     """Parse + validate the launcher's argv. Returns (args, status_dir).
 
@@ -353,6 +401,10 @@ def _parse_args(argv):
                     help="User-provided translation text file: skips the "
                          "LLM translation chain (S2a-S2c) in --steps "
                          "translate/full runs")
+    ap.add_argument("--no-speedup", dest="no_speedup", action="store_true",
+                    help="v0.29.6 (AI · test rules option): never speed a "
+                         "long dub piece up to fit its slot. Forwarded to "
+                         "dub_engine.py.")
     ap.add_argument("--script-source", dest="script_source",
                     default="prompt", choices=["prompt", "ai", "ai_test", "prompt_agents", "eleven"],
                     help="v0.18: 'ai' = the Lekhak agentic translator "
@@ -366,7 +418,24 @@ def _parse_args(argv):
                     help="Re-voice --in-wav with the ElevenLabs voice "
                          "changer (speech-to-speech) and write --out-wav")
     ap.add_argument("--in-wav", dest="in_wav", default=None,
-                    help="Input audio file for --voice-change")
+                    help="Input audio file for --voice-change / "
+                         "--skip-pauses")
+    ap.add_argument("--skip-pauses", dest="skip_pauses", action="store_true",
+                    help="v0.29.5: cut the pauses out of one chunk's audio "
+                         "(--in-wav, --in-start/--in-len seconds) into "
+                         "--out-wav. Local only, no API call. Forwarded to "
+                         "dub_engine.py.")
+    ap.add_argument("--add-pauses", dest="add_pauses", action="store_true",
+                    help="v0.29.7: insert silence into the pauses of one "
+                         "chunk's audio (--add-s seconds in total). Local "
+                         "only. Forwarded to dub_engine.py.")
+    ap.add_argument("--add-s", dest="add_s", type=float, default=0.0,
+                    help="--add-pauses: total silence to add (seconds)")
+    ap.add_argument("--in-start", dest="in_start", type=float, default=0.0,
+                    help="--skip-pauses: chunk start in --in-wav (seconds)")
+    ap.add_argument("--in-len", dest="in_len", type=float, default=0.0,
+                    help="--skip-pauses: chunk length in --in-wav (seconds, "
+                         "0 = to the end)")
     ap.add_argument("--sts-model", dest="sts_model",
                     default="eleven_multilingual_sts_v2",
                     help="ElevenLabs speech-to-speech model for "
@@ -442,6 +511,10 @@ def _parse_args(argv):
         if not args.language or not args.text_file:
             ap.error("--review-assist/--recommend-voice/--learn-final "
                      "require --language and --text-file")
+    elif args.skip_pauses or args.add_pauses:
+        if not args.in_wav or not args.out_wav:
+            ap.error("--skip-pauses/--add-pauses require --in-wav and "
+                     "--out-wav")
     elif args.suggest_fit:
         if args.test_llm or args.regen_chunk or args.list_voices \
            or args.voice_change:
@@ -583,6 +656,14 @@ def main(argv=None) -> int:
             cmd.append("--test-llm")
         elif args.list_voices:
             cmd.append("--list-voices")
+        elif args.skip_pauses or args.add_pauses:
+            cmd += ["--add-pauses" if args.add_pauses else "--skip-pauses",
+                    "--in-wav", args.in_wav,
+                    "--out-wav", args.out_wav,
+                    "--in-start", repr(float(args.in_start or 0.0)),
+                    "--in-len", repr(float(args.in_len or 0.0))]
+            if args.add_pauses:
+                cmd += ["--add-s", repr(float(args.add_s or 0.0))]
         elif args.voice_change:
             cmd += ["--voice-change",
                     "--in-wav", args.in_wav,
@@ -603,6 +684,8 @@ def main(argv=None) -> int:
             if args.script_source in ("ai", "ai_test", "prompt_agents",
                                       "eleven"):
                 cmd += ["--script-source", args.script_source]
+            if args.no_speedup:
+                cmd.append("--no-speedup")
             if args.sync_mode:
                 cmd += ["--sync-mode", args.sync_mode]
             if args.chunk_mode:
@@ -657,9 +740,11 @@ def main(argv=None) -> int:
         # when REAPER starts us detached, so the echo must never be allowed to
         # crash the tee loop.
         echo = sys.stdout
+        timer = _StepTimer()
         for line in proc.stdout:
             log_file.write(line)
             log_file.flush()
+            timer.see(line)
             if echo is not None:
                 try:
                     echo.write(line)
@@ -669,6 +754,14 @@ def main(argv=None) -> int:
 
         proc.wait()
         exit_code = proc.returncode
+        # v0.29.4: where the time went, appended after the worker's last line
+        # (still before the done marker). Lines start with "[run_dub]", so no
+        # stage-tag grep in the panel can mistake them for progress.
+        try:
+            log_file.write(timer.report())
+            log_file.flush()
+        except Exception:
+            pass
     except Exception:
         try:
             log_file.write("\n[run_dub] launcher crashed:\n")

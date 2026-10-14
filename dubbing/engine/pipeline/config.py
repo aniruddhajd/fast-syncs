@@ -535,6 +535,18 @@ def _lang_tokens(language: str) -> tuple:
 # Characters per ElevenLabs TTS request chunk
 ELEVENLABS_CHUNK_CHARS = 1000
 
+# v0.29.4: how many ElevenLabs TTS requests run at the same time. The
+# stretches of a dub are independent (their prosody context is text, not the
+# previous reply), so they used to wait on each other for nothing. ElevenLabs
+# caps concurrency per plan (Free 2, Starter 3, Creator 5, Pro 10); a request
+# over the cap gets a 429, which _el_read already retries with backoff.
+# Override with the DUB_TTS_CONCURRENCY environment variable (1 = old serial).
+try:
+    ELEVENLABS_TTS_CONCURRENCY = max(1, min(10, int(
+        os.environ.get("DUB_TTS_CONCURRENCY", "3"))))
+except ValueError:
+    ELEVENLABS_TTS_CONCURRENCY = 3
+
 # ─── TTS byte-chunk limit ─────────────────────────────────────────────────────
 TTS_MAX_BYTES = 4800   # Safe limit below the 5000-byte API cap
 

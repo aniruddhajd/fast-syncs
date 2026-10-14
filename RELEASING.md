@@ -80,7 +80,15 @@ whatever branch the clone is on. If you cloned before this change you are on
 
 ## Rolling back
 
-Something shipped broken? Two ways, no repo access needed:
+Something shipped broken? Three ways, no repo access needed:
+
+**In the panel:** Settings → About → *Roll back to an earlier version*. The
+dropdown lists every published release (from the GitHub releases API);
+**Roll back…** runs the updater with `--version X.Y.Z`, which installs that
+release's `fast-syncs.zip` (or, on a git clone, checks out its `vX.Y.Z` tag
+and remembers the branch in `.git/fast-syncs-branch` so the next normal update
+returns to it). The "update available" dialog then stays quiet for that
+version until **Re-install latest** is used.
 
 **Any user, right now:** download the previous `fast-syncs.zip` from the
 [Releases page](https://github.com/aniruddhajd/fast-syncs/releases) and

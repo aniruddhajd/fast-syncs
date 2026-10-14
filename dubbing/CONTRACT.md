@@ -168,6 +168,60 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+31. **v0.29.7: "Longer (add pauses)" adds silence to the audio**
+    (Regenerate tab) — the mirror of entry 29. `--add-pauses [--add-s <s>]`
+    with the same `--in-wav/--out-wav/--in-start/--in-len`
+    (`pause_skip.add_pauses_segment`): silence goes in at the middle of every
+    pause inside the chunk (>= 0.12 s), `--add-s` shared evenly (0 = 0.3 s
+    each), capped at 1.2 s per pause; lead-in untouched. Manifest adds
+    `added_s` (`pauses_cut` = pauses lengthened). The panel sizes `--add-s`
+    to the gap before the next chunk minus 0.08 s (x playrate); no room ->
+    button disabled; last chunk -> engine default. Output
+    `regen/chunk_<ms>_pauses_v<K>.wav`, swapped like a regeneration, so "Put
+    the old one back" undoes it. Review screen keeps the text request.
+    - **v0.29.8: between words too** (`pause_skip.gap_points`). TTS often
+      has no 0.12 s pause in a line, so silence also goes into word gaps:
+      a short non-speech dip or an energy valley >= 12 dB under the speech
+      level, >= 0.25 s apart, never within 0.12 s of the first/last speech.
+      A pause takes twice a word gap's share (word gap default 0.12 s, cap
+      0.5 s); word cuts get a 6 ms fade each side.
+
+30. **v0.29.6: "Speed up pieces that run long (up to 1.25×)"** — an
+    AI · test rules option, on the setup screen (under the test-mode note)
+    and in the review screen's transport bar, before Continue to dubbing.
+    Saved as `"ai_speedup"` in the panel settings; default ON (the old
+    behaviour). OFF adds `--no-speedup` to the translate/full launch and the
+    dub resume (`run_dub.py` forwards it). In anchor sync's S3d the stretch
+    ceiling becomes 1.0: no piece is time-stretched to fit; long pieces get
+    the fit retry (rewritten shorter) and anything still long goes to the
+    Unsync track via `place_pieces`. The reviewer's own per-row speeds still
+    apply. Harness cases `screen/setup(ai_test)`, `ui_phase_review(ai_test)`.
+
+29. **v0.29.5: "Shorter (skip pauses)" cuts the audio** (Regenerate tab).
+    On a chunk that already has audio the button no longer asks the AI for
+    re-punctuated text: it cuts the silent stretches out of the take and
+    joins the speech. Same words, same voice, no credits.
+    - **Engine:** `--skip-pauses --in-wav <source> --out-wav <wav>
+      [--in-start <s>] [--in-len <s>]` (`_run_skip_pauses`,
+      `pipeline/pause_skip.py`). Local only: no LLM, no API key, no full
+      pipeline import. Pauses come from `spectral_vad.spectral_pauses`;
+      each pause >= 0.15 s keeps 0.06 s of silence, the joins get a 10 ms
+      crossfade, leading silence is kept (the chunk's position is its
+      sync), trailing silence is trimmed to 0.08 s. Tunable with
+      `skip_pause_keep_s` / `skip_pause_min_s` in `engine_settings.json`.
+      `run_dub.py` forwards the flags.
+    - **Manifest:** `{status, error, regen_wav, pauses_cut, removed_s}`.
+      `regen_wav` is `""` when nothing was long enough to cut (the take is
+      left alone).
+    - **Panel:** a QUIET job. The take's own section is sent
+      (`--in-start` = take start offset, `--in-len` = item length x
+      playrate); the result lands in `<out_dir>/regen/chunk_<ms>_nopause_v<K>.wav`
+      and is swapped in like a regeneration (text and speed kept, item
+      shorter), so "Put the old one back" undoes it. One chunk at a time.
+      The review screen (no audio yet) keeps the text request.
+    - Tests: `engine/tests/test_pause_skip.py`; layout harness case
+      `screen/regen(chunk selected)`.
+
 29. **v0.29.3: one "Clear AI memory (<lang>)" button** (Regenerate tab and
     success screen, under "Learn from final dub"; asks twice).
     - It runs `--clear-memory --language L`, local files only. That first

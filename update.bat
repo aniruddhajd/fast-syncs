@@ -24,7 +24,8 @@ if errorlevel 1 (
 rem Pass the project dir with a trailing "." (not a bare "%~dp0", which ends
 rem in a backslash — "C:\path\" can confuse quote parsing). "C:\path\." is
 rem unambiguous and cd resolves it to the folder.
-"%TEMP%\fast-syncs-update.bat" --from-temp "%~dp0."
+rem %1 %2 carry an optional "--version X.Y.Z" through to the temp copy.
+"%TEMP%\fast-syncs-update.bat" --from-temp "%~dp0." %1 %2
 exit /b
 
 :run
@@ -45,6 +46,28 @@ rem over this folder - settings and venv are preserved either way.
 set "ZIP_URL=https://github.com/aniruddhajd/fast-syncs/releases/latest/download/fast-syncs.zip"
 rem Set FAST_SYNCS_ZIP_URL beforehand to override (e.g. to pin an older release).
 if defined FAST_SYNCS_ZIP_URL set "ZIP_URL=%FAST_SYNCS_ZIP_URL%"
+
+rem "update.bat --version X.Y.Z" (the panel's "Roll back..." button) installs
+rem that one release instead of the newest. A leading "v" is fine. Digits and
+rem dots only: the value goes into a URL and a git ref. Flat gotos, no block,
+rem so nothing here depends on parse-time expansion.
+set "PIN_VERSION="
+if /i "%~3"=="--version" set "PIN_VERSION=%~4"
+if not defined PIN_VERSION goto pin_done
+if /i "%PIN_VERSION:~0,1%"=="v" set "PIN_VERSION=%PIN_VERSION:~1%"
+echo %PIN_VERSION%| findstr /r /x "[0-9][0-9.]*" >nul
+if errorlevel 1 goto pin_bad
+rem The pinned release's own ZIP. Defining FAST_SYNCS_ZIP_URL too makes
+rem :zip_update skip its "latest code" fallback - installing some OTHER
+rem version than the one asked for would defeat the point of picking one.
+set "ZIP_URL=https://github.com/aniruddhajd/fast-syncs/releases/download/v%PIN_VERSION%/fast-syncs.zip"
+set "FAST_SYNCS_ZIP_URL=%ZIP_URL%"
+goto pin_done
+:pin_bad
+echo [update] Not a version number - expected something like 0.28.9.
+pause
+exit /b 1
+:pin_done
 rem Used only if the release download fails - see :zip_update below.
 set "FALLBACK_ZIP_URL=https://codeload.github.com/aniruddhajd/fast-syncs/zip/refs/heads/production"
 rem NO_DL is set when the new files could NOT be fetched, so the final
@@ -73,7 +96,6 @@ goto zip_update
 
 rem ── git checkout: pull ────────────────────────────────────────
 :git_update
-echo [update] Pulling latest changes...
 where git >nul 2>&1
 if errorlevel 1 (
   echo [update] WARNING: git is not on PATH - cannot pull the latest version.
@@ -81,6 +103,12 @@ if errorlevel 1 (
   set "NO_DL=1"
   goto deps
 )
+if defined PIN_VERSION goto git_pin
+rem After a roll back the checkout sits on a detached tag, where "git pull"
+rem cannot work: go back to the branch first (see :git_leave_pin).
+git symbolic-ref -q HEAD >nul 2>&1
+if errorlevel 1 call :git_leave_pin
+echo [update] Pulling latest changes...
 git pull --ff-only
 if errorlevel 1 (
   echo [update] git pull could not fast-forward ^(diverged or local edits^) -
@@ -89,9 +117,39 @@ if errorlevel 1 (
 )
 goto deps
 
+rem ── git checkout: switch to a pinned release (roll back) ──────
+rem Moves the checkout to the release's tag (detached HEAD). The branch we
+rem were on is remembered in .git\fast-syncs-branch so the next normal update
+rem can return to it. Refuses - changes nothing - when local edits are in the
+rem way; it never overlays a ZIP here, which would leave the tree dirty for
+rem every later pull.
+:git_pin
+echo [update] Switching to v%PIN_VERSION%...
+set "PIN_BRANCH="
+for /f "delims=" %%B in ('git symbolic-ref --short -q HEAD 2^>nul') do set "PIN_BRANCH=%%B"
+git fetch --quiet --tags origin
+if errorlevel 1 goto git_pin_nofetch
+git -c advice.detachedHead=false checkout --quiet "v%PIN_VERSION%"
+if errorlevel 1 goto git_pin_failed
+rem Only on the FIRST roll back: a second one starts already detached and
+rem must keep the original branch name.
+if defined PIN_BRANCH (echo %PIN_BRANCH%)> ".git\fast-syncs-branch"
+echo [update] Files switched to v%PIN_VERSION%.
+goto deps
+:git_pin_nofetch
+echo [update] Could not reach GitHub to fetch v%PIN_VERSION% - nothing was changed.
+set "NO_DL=1"
+goto deps
+:git_pin_failed
+echo [update] Could not switch to v%PIN_VERSION% - no such release, or local
+echo          edits to tracked files are in the way. Nothing was changed.
+set "NO_DL=1"
+goto deps
+
 rem ── ZIP install: download latest ZIP and overlay it ───────────
 :zip_update
-echo [update] Downloading the latest version from GitHub...
+if defined PIN_VERSION echo [update] Downloading v%PIN_VERSION% from GitHub...
+if not defined PIN_VERSION echo [update] Downloading the latest version from GitHub...
 where curl >nul 2>&1
 if errorlevel 1 goto zip_manual
 where tar >nul 2>&1
@@ -241,6 +299,9 @@ echo.
 if defined NO_DL (
   echo Update finished, but the new version could NOT be downloaded -
   echo see the messages above. Your current version keeps working.
+) else if defined PIN_VERSION (
+  echo Version %PIN_VERSION% installed. Re-run the script in REAPER to use it.
+  echo The panel's About page can bring you back to the newest version.
 ) else (
   echo Update complete. Re-run the script in REAPER to use the new version.
 )
@@ -418,4 +479,16 @@ set "ATTR="
 for %%F in ("%~f1") do set "ATTR=%%~aF"
 if not defined ATTR goto :eof
 if not "%ATTR:l=%"=="%ATTR%" set "ISLINK=1"
+goto :eof
+
+rem ── leave a rolled-back (detached) checkout ───────────────────
+rem Back to the branch :git_pin remembered, else production. If the checkout
+rem fails, the "git pull" after it fails too and the usual ZIP fallback runs.
+:git_leave_pin
+set "PIN_BRANCH=production"
+if exist ".git\fast-syncs-branch" set /p PIN_BRANCH=<".git\fast-syncs-branch"
+echo [update] Leaving the rolled-back version - back to branch %PIN_BRANCH%...
+git checkout --quiet "%PIN_BRANCH%"
+if errorlevel 1 goto :eof
+del /q ".git\fast-syncs-branch" 2>nul
 goto :eof

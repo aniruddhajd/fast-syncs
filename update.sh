@@ -26,6 +26,10 @@ ZIP_URL="https://github.com/aniruddhajd/fast-syncs/releases/latest/download/fast
 #   FAST_SYNCS_ZIP_URL=https://github.com/.../download/v0.12.0/fast-syncs.zip bash update.sh
 ZIP_URL="${FAST_SYNCS_ZIP_URL:-$ZIP_URL}"
 
+# Set by `--version X.Y.Z` (the panel's "Roll back…" button): install that one
+# release instead of the newest. Empty = a normal update. See parse_args.
+PIN_VERSION=""
+
 # Fallback for the window BEFORE the first release exists: the releases/latest
 # URL 404s until something has actually been published, and an updater that
 # stops working the moment this lands would be worse than the problem it fixes.
@@ -219,7 +223,11 @@ manifest_prune() {
 # folder. Settings, venv and .direct-mode aren't in the ZIP, so they survive.
 # Runs inside main() (fully parsed), so rewriting update.sh mid-run is safe.
 zip_update() {
-    echo "[update] Downloading the latest version from GitHub…"
+    if [ -n "$PIN_VERSION" ]; then
+        echo "[update] Downloading v$PIN_VERSION from GitHub…"
+    else
+        echo "[update] Downloading the latest version from GitHub…"
+    fi
     local tmp="${TMPDIR:-/tmp}/fast-syncs-zip"
     rm -rf "$tmp" && mkdir -p "$tmp"
     if ! curl -fsSL -o "$tmp/repo.zip" "$ZIP_URL"; then
@@ -268,10 +276,76 @@ zip_update() {
     fi
 }
 
+# `--version X.Y.Z` (a leading "v" is fine) pins one published release —
+# that is how the panel's "Roll back…" button installs an older version.
+# Anything else on the command line is ignored, as before.
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version) PIN_VERSION="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+            *) shift ;;
+        esac
+    done
+    PIN_VERSION="${PIN_VERSION#v}"
+    [ -n "$PIN_VERSION" ] || return 0
+    # Digits and dots only: the value goes into a URL and a git ref.
+    case "$PIN_VERSION" in
+        *[!0-9.]*|.*)
+            echo "[update] Not a version number: '$PIN_VERSION' (expected e.g. 0.28.9)."
+            exit 1 ;;
+    esac
+    # The pinned release's own ZIP. Setting FAST_SYNCS_ZIP_URL too makes
+    # zip_update skip its "latest code" fallback — installing some OTHER
+    # version than the one asked for would defeat the point of picking one.
+    ZIP_URL="https://github.com/aniruddhajd/fast-syncs/releases/download/v$PIN_VERSION/fast-syncs.zip"
+    FAST_SYNCS_ZIP_URL="$ZIP_URL"
+}
+
+# git installs: move the checkout to the release's tag (detached HEAD). The
+# branch we were on is remembered in .git/fast-syncs-branch so the next normal
+# update can go back to it (git_leave_pin). Refuses — changes nothing — when
+# local edits are in the way; it never overlays a ZIP over a git checkout here,
+# because that would leave the tree dirty for every later pull.
+git_pin() {
+    local tag="v$PIN_VERSION" br
+    echo "[update] Switching to $tag…"
+    br=$(git symbolic-ref --short -q HEAD || true)
+    if ! git fetch --quiet --tags origin; then
+        echo "[update] Could not reach GitHub to fetch $tag — nothing was changed."
+        NO_DL=1
+        return 0
+    fi
+    if ! git -c advice.detachedHead=false checkout --quiet "$tag"; then
+        echo "[update] Could not switch to $tag (no such release, or local edits"
+        echo "         to tracked files are in the way) — nothing was changed."
+        NO_DL=1
+        return 0
+    fi
+    # Only on the FIRST roll back: a second one starts already detached and
+    # must keep the original branch name.
+    if [ -n "$br" ]; then echo "$br" > .git/fast-syncs-branch; fi
+    echo "[update] Files switched to $tag."
+}
+
+# A normal update after a roll back: the checkout is on a detached tag, where
+# `git pull` cannot work. Go back to the remembered branch (else production).
+git_leave_pin() {
+    git symbolic-ref -q HEAD >/dev/null && return 0
+    local br="production"
+    if [ -f .git/fast-syncs-branch ]; then br=$(cat .git/fast-syncs-branch); fi
+    echo "[update] Leaving the rolled-back version — back to branch $br…"
+    if git checkout --quiet "$br"; then rm -f .git/fast-syncs-branch; fi
+    return 0
+}
+
 main() {
     cd "$(dirname "$0")"
+    parse_args "$@"
 
-    if [ -d .git ] && command -v git >/dev/null 2>&1; then
+    if [ -d .git ] && command -v git >/dev/null 2>&1 && [ -n "$PIN_VERSION" ]; then
+        git_pin
+    elif [ -d .git ] && command -v git >/dev/null 2>&1; then
+        git_leave_pin
         echo "[update] Pulling latest changes…"
         # --ff-only aborts on a diverged / locally-modified checkout. Don't
         # let that fail the whole update (set -e) — fall back to the ZIP
@@ -333,6 +407,9 @@ main() {
     if [ "$NO_DL" = "1" ]; then
         echo "Update finished, but the new version could NOT be downloaded —"
         echo "see the messages above. Your current version keeps working."
+    elif [ -n "$PIN_VERSION" ]; then
+        echo "Version $PIN_VERSION installed. Re-run the script in REAPER to use it."
+        echo "(Update… in the panel's About pane brings you back to the newest.)"
     else
         echo "Update complete. Re-run the script in REAPER to use the new version."
     fi

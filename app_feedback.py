@@ -215,9 +215,11 @@ def _log_files(base: str):
     return out
 
 
-def collect_logs(app_version: str = "", base: str = "") -> str:
+def collect_logs(app_version: str = "", base: str = "", extra=None) -> str:
     """Bundle the recent logs into diagnostics_<stamp>.zip in the temp folder.
-    Returns its path, or "" when there is nothing to send. Never raises."""
+    `extra` is a list of log paths the caller knows matter (the panel passes
+    the log it is showing right now). Returns its path, or "" when there is
+    nothing to send. Never raises."""
     import datetime
     import platform
     import tempfile
@@ -225,6 +227,9 @@ def collect_logs(app_version: str = "", base: str = "") -> str:
     try:
         base = base or os.path.dirname(os.path.abspath(__file__))
         files = _log_files(base)
+        for i, p in enumerate(extra or []):
+            if p and os.path.isfile(p):
+                files.insert(0, ("current_run/%d_%s" % (i, os.path.basename(p)), p))
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(tempfile.gettempdir(), "diagnostics_%s.zip" % stamp)
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -320,9 +325,12 @@ _DEFAULT_THEME = {
 
 
 def open_feedback_dialog(root=None, app_name="App", app_version="",
-                         theme=None, on_close=None):
+                         theme=None, on_close=None, kind="Feedback",
+                         extra_logs=None):
     """Open the feedback dialog. Pass an existing Tk root/window as `root`;
-    with root=None a standalone window is created (blocks until closed)."""
+    with root=None a standalone window is created (blocks until closed).
+    `kind` preselects Feedback / Improvement / Bug; `extra_logs` are log files
+    always bundled with the report (see collect_logs)."""
     import threading
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext
@@ -352,7 +360,8 @@ def open_feedback_dialog(root=None, app_name="App", app_version="",
              bg=th["bg"], fg=th["fg_faint"], font=(F, 9)
              ).pack(anchor="w", padx=14, pady=(0, 8))
 
-    kind_var = tk.StringVar(value="Feedback")
+    kind_var = tk.StringVar(value=kind if kind in ("Feedback", "Improvement", "Bug")
+                            else "Feedback")
     kind_row = tk.Frame(dlg, bg=th["bg"])
     kind_row.pack(anchor="w", padx=14)
     for label in ("💬 Feedback", "💡 Improvement", "🐞 Bug"):
@@ -456,7 +465,7 @@ def open_feedback_dialog(root=None, app_name="App", app_version="",
     def _worker(kind, sender, message, files, with_logs):
         if with_logs:
             root.after(0, status_lbl.config, {"text": "Collecting logs…"})
-            log_zip = collect_logs(app_version)
+            log_zip = collect_logs(app_version, extra=extra_logs)
             if log_zip:
                 files = files + [log_zip]
         try:
@@ -531,6 +540,8 @@ def main(argv=None):
                     help="open the graphical feedback dialog instead")
     ap.add_argument("--no-logs", action="store_true",
                     help="do not attach the app's recent logs")
+    ap.add_argument("--log-file", action="append", default=[], metavar="FILE",
+                    help="extra log file to bundle (repeatable)")
     args = ap.parse_args(argv)
     if not args.app_version:
         # The launchers pass no version; the VERSION file beside us is it.
@@ -543,7 +554,8 @@ def main(argv=None):
 
     if args.gui:
         open_feedback_dialog(None, app_name=args.app,
-                             app_version=args.app_version)
+                             app_version=args.app_version, kind=args.kind,
+                             extra_logs=args.log_file)
         return 0
 
     message = args.message
@@ -564,7 +576,7 @@ def main(argv=None):
         return 1
 
     if not args.no_logs:
-        log_zip = collect_logs(args.app_version)
+        log_zip = collect_logs(args.app_version, extra=args.log_file)
         if log_zip:
             args.attach = args.attach + [log_zip]
     try:

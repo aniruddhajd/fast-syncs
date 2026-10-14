@@ -681,6 +681,37 @@ H.set_cfg(CFG_FULL)
 sweep('screen/setup', function(c) H.setup(c) end, { 1040, 860, 700, 560 })
 H.set_cfg(CFG_EMPTY)
 sweep('screen/setup(empty)', function(c) H.setup(c) end, { 1040, 700 })
+-- v0.29.6: AI · test rules carries the speed-up checkbox on the setup screen
+-- and in the review screen's transport bar (the screen before dubbing).
+do
+  local cfg = {}
+  for k, v in pairs(CFG_AI) do cfg[k] = v end
+  cfg.SCRIPT_MODE = 'ai_test'
+  H.set_cfg(cfg)
+  local function has(name, fn, needle)
+    local t = draw(name, fn)
+    for _, it in ipairs((t and t.items) or {}) do
+      if tostring(it.label):find(needle, 1, true) then return end
+    end
+    fail(name, 'speed-up checkbox not drawn')
+  end
+  sweep('screen/setup(ai_test)', function(c) H.setup(c) end,
+        { 1040, 860, 700, 560 })
+  has('screen/setup(ai_test) [speed-up present]', function(c) H.setup(c) end,
+      'Speed up pieces that run long')
+  H.set_review(REVIEW)
+  H.set_phase('review')
+  for _, lay in ipairs({ 'list', 'grid' }) do
+    V5.review_layout = lay
+    sweep('ui_phase_review(ai_test)/' .. lay, function(c) H.review(c) end,
+          { 1040, 820, 640 })
+  end
+  has('ui_phase_review(ai_test) [speed-up present]',
+      function(c) H.review(c) end, 'Speed up long pieces')
+  H.set_phase('setup')
+  H.set_review(nil)
+  H.set_cfg(CFG_EMPTY)
+end
 -- v0.27 Console: both middles (a pasted script, and the engine log when there
 -- is no script yet), and every stage the rail can be showing.
 for _, cfg in ipairs({ CFG_FULL, CFG_EMPTY, CFG_AI }) do
@@ -1139,6 +1170,22 @@ do  -- the chip is really drawn (not skipped by an early return)
   end
   if not found then fail('screen/regen [learn chip present]', 'chip not drawn') end
 end
+-- v0.29.5: a chunk selected — the assistant row, with "Shorter (skip pauses)"
+-- now cutting the pauses out of the chunk's audio instead of asking the AI.
+T.set_project({ tracks = { { name = 'Dub Chunks', items = {
+  { pos = 10, len = 3, file = 'C:/runs/talk/talk_tts.wav', src_len = 600,
+    offs = 42, selected = true } } } } })
+sweep('screen/regen(chunk selected)', function(c) H.regen(c) end,
+      { 1040, 820, 640, 560 })
+do  -- the audio button is really drawn on the Regenerate tab
+  local t = draw('screen/regen [skip pauses present]', function(c) H.regen(c) end)
+  local found = false
+  for _, it in ipairs((t and t.items) or {}) do
+    if tostring(it.label):find('Shorter (skip pauses)', 1, true) then found = true end
+  end
+  if not found then fail('screen/regen [skip pauses present]', 'button not drawn') end
+end
+T.set_project({ tracks = {} })
 H.set_manifest({ status = 'ok', language = 'Hindi', out_dir = 'C:/runs/talk',
                  en_audio = 'a', tts_wav = 'b', synced_count = '12',
                  unsynced_count = '0' }, true)

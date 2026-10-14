@@ -317,6 +317,9 @@ LEARNF_MANIFEST_KEYS = ["status", "error", "learn_txt"]
 CLEARMEM_MANIFEST_KEYS = ["status", "error", "clear_summary", "clear_backup"]
 VOICES_MANIFEST_KEYS = ["status", "error", "voices"]
 VOICE_CHANGE_MANIFEST_KEYS = ["status", "error", "vc_wav"]
+# v0.29.5 --skip-pauses: same wav key as regen, so the panel swaps it alike
+SKIP_PAUSES_MANIFEST_KEYS = ["status", "error", "regen_wav", "pauses_cut",
+                             "removed_s", "added_s"]
 
 # Stand-in for a review row that has no text on one side (e.g. more
 # translation paragraphs than English segments). A visible placeholder keeps
@@ -370,6 +373,13 @@ def _parse_args():
                          "chain is SKIPPED and this text is used as the "
                          "translation. Transcription (S1a/S1b) still runs — "
                          "the sync stages need it.")
+    ap.add_argument("--no-speedup", dest="no_speedup", action="store_true",
+                    help="v0.29.6 (AI · test rules option): never change the "
+                         "tempo of a dub piece to fit its slot. Long pieces "
+                         "are rewritten shorter (fit retry) or go to the "
+                         "Unsync track instead of being sped up to "
+                         "max_atempo (1.25x). The reviewer's own per-row "
+                         "speeds still apply.")
     ap.add_argument("--script-source", dest="script_source",
                     default="prompt", choices=["prompt", "ai", "ai_test", "prompt_agents", "eleven"],
                     help="Who writes the script (v0.18). 'prompt' "
@@ -389,7 +399,27 @@ def _parse_args():
                          "convert --in-wav to the --voice-id voice and "
                          "write --out-wav. No other pipeline stages.")
     ap.add_argument("--in-wav", dest="in_wav", default=None,
-                    help="Input audio file for --voice-change")
+                    help="Input audio file for --voice-change / "
+                         "--skip-pauses")
+    ap.add_argument("--skip-pauses", dest="skip_pauses", action="store_true",
+                    help="v0.29.5: cut the pauses out of one chunk's audio "
+                         "(--in-wav, optionally only --in-start/--in-len "
+                         "seconds of it) and write --out-wav. Local only: "
+                         "no API call, no credits.")
+    ap.add_argument("--add-pauses", dest="add_pauses", action="store_true",
+                    help="v0.29.7: the mirror of --skip-pauses — insert "
+                         "silence into the pauses of one chunk's audio "
+                         "(--add-s seconds in total, shared by the pauses; "
+                         "0 = 0.3 s each). Same --in-wav/--out-wav/"
+                         "--in-start/--in-len. Local only, no API call.")
+    ap.add_argument("--add-s", dest="add_s", type=float, default=0.0,
+                    help="--add-pauses: total silence to add (seconds)")
+    ap.add_argument("--in-start", dest="in_start", type=float, default=0.0,
+                    help="--skip-pauses: where the chunk starts in --in-wav "
+                         "(seconds, default 0)")
+    ap.add_argument("--in-len", dest="in_len", type=float, default=0.0,
+                    help="--skip-pauses: how much of --in-wav the chunk "
+                         "plays (seconds, default 0 = to the end)")
     ap.add_argument("--sts-model", dest="sts_model",
                     default="eleven_multilingual_sts_v2",
                     help="ElevenLabs speech-to-speech model for "
@@ -495,6 +525,11 @@ def _parse_args():
         if not args.language or not args.text_file:
             ap.error("--review-assist/--recommend-voice/--learn-final "
                      "require --language and --text-file")
+        return args
+    if args.skip_pauses or args.add_pauses:
+        if not args.in_wav or not args.out_wav:
+            ap.error("--skip-pauses/--add-pauses require --in-wav and "
+                     "--out-wav")
         return args
     if args.suggest_fit:
         if args.test_llm or args.regen_chunk or args.list_voices \
@@ -1072,6 +1107,23 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
         _note(f"Test mode (AI · test rules): house rules ON, nothing is "
               f"learned; results go to {os.path.basename(out_dir)}.")
 
+    # v0.29.5: decode once, up front, and refuse silent audio BEFORE the paid
+    # upload. A REAPER source track with its fader pulled down rendered a
+    # 19-minute wav at ~-120 dBFS; Scribe took 3 minutes and our money to
+    # return zero words. S1b reuses this decode below.
+    y_data, sr = pl._load_audio_any(audio_path)
+    if len(y_data):
+        import math
+        peak = float(abs(y_data).max())
+        peak_db = 20.0 * math.log10(peak) if peak > 0 else -200.0
+        if peak_db < -50.0:
+            raise RuntimeError(
+                f"The source audio is silent (peak {peak_db:.0f} dBFS): "
+                f"{os.path.basename(audio_path)}. Nothing was sent to "
+                "ElevenLabs. In REAPER, check the source track's fader and "
+                "mute, the item's volume, and the time selection, then run "
+                "again.")
+
     # ── [S1a] Transcribe the English audio ─────────────────────────────────
     _say("S1a", "Transcribing English audio (ElevenLabs Scribe)…")
     result = pl._transcribe_audio(audio_path, api_key)
@@ -1081,14 +1133,21 @@ def _stage_translate(pl, args, api_key, manifest, ctx):
         raw_eng = " ".join(w.get("text", "").strip() for w in words
                            if w.get("type", "word") == "word")
     if not words:
-        raise RuntimeError("No word data from ElevenLabs for the English "
-                           "audio.")
+        # v0.29.4: say WHY in words a user can act on. The usual cause is a
+        # source cut from a tiny or silent time selection (a 1-second
+        # "..._0m33s-0m34s.wav" did exactly this).
+        raise RuntimeError(
+            "ElevenLabs heard no English words in the source audio "
+            f"({os.path.basename(audio_path)}). It is probably too short, "
+            "silent or has no speech — in REAPER check the time selection / "
+            "region (clear it to dub the whole item), and that the source "
+            "track's fader, mute and the item's volume are up, then run "
+            "again.")
     _say("S1a", f"Transcription done ({len(words)} word tokens).")
     ctx["words"], ctx["raw_eng"] = words, raw_eng
 
     # ── [S1b] Regions + English SRT + analysis format ───────────────────────
     _say("S1b", "Detecting speech regions in the English audio…")
-    y_data, sr = pl._load_audio_any(audio_path)
     regions = pl._detect_regions_from_audio(
         y_data, sr, pl.DEFAULT_THR_DB, pl.DEFAULT_HYS_DB,
         pl.DEFAULT_MIN_MS)
@@ -1836,6 +1895,12 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
     grain = _chunk_mode(args)
     max_atempo = _engine_setting("max_atempo", pl.MAX_ATEMPO, float,
                                  minimum=1.0, maximum=2.0)
+    # v0.29.6: "Speed up pieces that run long" off -> the tempo never
+    # changes; long pieces get the fit retry, then the placer's Unsync.
+    if getattr(args, "no_speedup", False):
+        max_atempo = 1.0
+        _note("Speed-up is OFF: no piece is time-stretched to fit; long "
+              "pieces are rewritten shorter or go to the Unsync track.")
     retry_on = bool(_engine_setting("ai_fit_retry", 1, int, 0, 1))
     retry_cap = _engine_setting("ai_fit_retry_max", 12, int, 0, 200)
     cast = _cast_map(pl, base)
@@ -2076,7 +2141,7 @@ def _stage_dub_anchor(pl, args, api_key, manifest, ctx, voice_id, rows):
         for i, sg in enumerate(segs):
             dur_ms = max(1.0, float(len(sg)))
             slot_ms = _slot(i) * 1000.0
-            if dur_ms > slot_ms:
+            if dur_ms > slot_ms and max_atempo > 1.0:
                 sg = _stretch_segment(pl, sg, min(dur_ms / slot_ms, max_atempo),
                                       out_dir, i + 1)
                 stretched += 1
@@ -3577,6 +3642,90 @@ def _run_voice_change(args, manifest):
     _note(f"Voice-changed audio saved: {os.path.basename(out_wav)}")
 
 
+def _run_skip_pauses(args, manifest):
+    """--skip-pauses (v0.29.5): cut the pauses out of one chunk's audio.
+
+    The Regenerate tab's "Shorter (skip pauses)": reads --in-wav (only the
+    [--in-start, --in-start + --in-len] seconds the chunk's take plays, when
+    given), shortens every pause inside it to a short breath, joins the
+    speech (pipeline/pause_skip.py) and writes --out-wav. Local only — no
+    API call, no credits, no LLM. Manifest: {"status":"ok","regen_wav":
+    "<abs>" or "" when there was nothing to cut, "pauses_cut", "removed_s"}.
+    """
+    manifest["regen_wav"] = ""
+    manifest["pauses_cut"] = "0"
+    manifest["removed_s"] = "0"
+    manifest["added_s"] = "0"
+    in_wav = os.path.abspath(os.path.expanduser(args.in_wav))
+    if not os.path.isfile(in_wav):
+        raise RuntimeError(f"--in-wav not found: {in_wav}")
+    out_wav = os.path.abspath(os.path.expanduser(args.out_wav))
+
+    # Only config (ffmpeg on PATH before pydub loads) and the cutter — the
+    # full pipeline import would pull in every provider SDK for nothing.
+    if ENGINE_DIR not in sys.path:
+        sys.path.insert(0, ENGINE_DIR)
+    from pipeline import config as pcfg, pause_skip
+    _require_ffmpeg(pcfg, hard=True)
+    if not pcfg.PYDUB_AVAILABLE:
+        raise RuntimeError("pydub is not installed — re-run the setup script.")
+
+    seg = pcfg._AudioSegment.from_file(in_wav)
+    start_ms = max(0, int(round((args.in_start or 0.0) * 1000)))
+    if args.in_len and args.in_len > 0:
+        seg = seg[start_ms:start_ms + int(round(args.in_len * 1000))]
+    elif start_ms:
+        seg = seg[start_ms:]
+    if len(seg) < 50:
+        raise RuntimeError(f"The chunk's audio is empty ({len(seg)} ms at "
+                           f"{start_ms} ms in {os.path.basename(in_wav)}).")
+
+    out_parent = os.path.dirname(out_wav)
+    if getattr(args, "add_pauses", False):
+        # v0.29.7 Longer (add pauses): "pauses_cut" counts the pauses that
+        # were lengthened, "added_s" how much longer the chunk got.
+        add_s = max(0.0, float(args.add_s or 0.0))
+        _note(f"Adding pauses in {len(seg) / 1000.0:.2f} s of audio ("
+              + (f"{add_s:.2f} s in total" if add_s > 0 else
+                 f"{pause_skip.SP_ADD_PER_PAUSE_S:.2f} s per pause") + ")…")
+        out, info = pause_skip.add_pauses_segment(seg, add_s=add_s)
+        manifest["pauses_cut"] = str(info["pauses"])
+        manifest["added_s"] = f"{info['added_s']:.2f}"
+        if info["pauses"] == 0 or info["added_s"] < 0.01:
+            _note("No gap between words or pause found in this chunk — the "
+                  "take is left as it is.")
+            return
+        if out_parent:
+            os.makedirs(out_parent, exist_ok=True)
+        out.export(out_wav, format="wav")
+        manifest["regen_wav"] = out_wav
+        _note(f"Silence added at {info['pauses']} gap(s) "
+              f"({info['word_gaps']} between words): {info['in_s']:.2f} s -> "
+              f"{info['out_s']:.2f} s ({os.path.basename(out_wav)})")
+        return
+
+    keep_s = _engine_setting("skip_pause_keep_s", pause_skip.SP_KEEP_S,
+                             float, 0.0, 0.5)
+    min_s = _engine_setting("skip_pause_min_s", pause_skip.SP_MIN_PAUSE_S,
+                            float, 0.05, 2.0)
+    _note(f"Skipping pauses in {len(seg) / 1000.0:.2f} s of audio "
+          f"(pauses >= {min_s:.2f} s -> {keep_s:.2f} s)…")
+    out, info = pause_skip.skip_pauses_segment(seg, keep_s=keep_s,
+                                               min_pause_s=min_s)
+    manifest["pauses_cut"] = str(info["pauses_cut"])
+    manifest["removed_s"] = f"{info['removed_s']:.2f}"
+    if info["removed_s"] < 0.02:
+        _note("No pause long enough to cut — the take is left as it is.")
+        return
+    out_parent = os.path.dirname(out_wav)
+    if out_parent:
+        os.makedirs(out_parent, exist_ok=True)
+    out.export(out_wav, format="wav")
+    manifest["regen_wav"] = out_wav
+    _note(f"Cut {info['pauses_cut']} pause(s): {info['in_s']:.2f} s -> "
+          f"{info['out_s']:.2f} s ({os.path.basename(out_wav)})")
+
+
 def _run_test_llm(args, manifest):
     """--test-llm: one tiny call on the configured LLM provider.
 
@@ -4190,6 +4339,9 @@ def main() -> int:
     elif args.voice_change:
         keys, runner, ok_status = (VOICE_CHANGE_MANIFEST_KEYS,
                                    _run_voice_change, "ok")
+    elif args.skip_pauses or args.add_pauses:
+        keys, runner, ok_status = (SKIP_PAUSES_MANIFEST_KEYS,
+                                   _run_skip_pauses, "ok")
     elif args.regen_chunk:
         keys, runner, ok_status = REGEN_MANIFEST_KEYS, _run_regen, "ok"
     elif args.steps == "plan":

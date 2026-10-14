@@ -30,6 +30,7 @@ from .config import GEMINI_DEFAULT_MODEL
 from .llm import _llm_generate, _strip_code_fence
 
 AI_PROOF_BATCH = 6           # lekhak BATCH_SIZE
+AI_PROOF_CONCURRENCY = 3     # v0.29.4: proofer batches in flight
 AI_MAX_FINDINGS = 6          # lekhak proofer MAX_FINDINGS
 AI_MAX_SUGGESTIONS = 3
 
@@ -262,35 +263,51 @@ def proof_pages(items: Sequence[dict], language: str, guidelines: str = "",
     say = status_cb or (lambda _m: None)
     prefix = proofer_prefix(language, guidelines, profile, house_rules)
     found: Dict[int, List[dict]] = {}
-    for i in range(0, len(items), AI_PROOF_BATCH):
-        sl = list(items[i:i + AI_PROOF_BATCH])
-        blocks = "\n\n".join(
-            f"### PAGE {n}\nENGLISH SOURCE:\n\"\"\"\n{p['source']}\n\"\"\"\n\n"
-            f"{language} TRANSLATION:\n\"\"\"\n{p['target']}\n\"\"\""
-            for n, p in enumerate(sl, 1))
-        instruction = (
-            f"\n\nProofread each of the {len(sl)} page(s) below.\n"
-            "Return JSON: {\"pages\":[{\"n\":<page number>,\"findings\":"
-            f"[{{\"sentence\":\"<exact {language} sentence>\",\"severity\":"
-            "\"review\"|\"polish\",\"reason\":\"<short English reason>\","
-            f"\"suggestions\":[\"<replacement {language} sentence>\"]}}]}}]}}\n"
-            "Include every page number exactly once, with an empty findings "
-            "list when the page is clean.\n\n")
-        try:
-            data = _ai_call(instruction + blocks, model, "proofer", 0.2,
-                            attempts=2, static_prefix=prefix)
-            pages = data.get("pages") if isinstance(data, dict) else None
-            for page in pages or []:
-                try:
-                    n = int(page.get("n"))
-                except Exception:                    # noqa: BLE001
-                    continue
-                if not 1 <= n <= len(sl):
-                    continue
-                it = sl[n - 1]
-                found[it["id"]] = sanitise_findings(page.get("findings"),
-                                                    it["target"])
-        except Exception as e:                       # noqa: BLE001
-            say(f"WARNING: proofer batch of {len(sl)} page(s) did not run "
-                f"({str(e)[:120]}) — those pages have no findings.")
+    slices = [list(items[i:i + AI_PROOF_BATCH])
+              for i in range(0, len(items), AI_PROOF_BATCH)]
+    # v0.29.4: the batches are independent calls with the same prompts, so
+    # they run AI_PROOF_CONCURRENCY at a time instead of one after another (a
+    # long video has several). Each batch writes only its own page ids.
+    if len(slices) > 1:
+        with ThreadPoolExecutor(max_workers=min(AI_PROOF_CONCURRENCY,
+                                                len(slices))) as ex:
+            list(ex.map(lambda sl: _proof_batch(sl, language, prefix, model,
+                                                found, say), slices))
+    else:
+        for sl in slices:
+            _proof_batch(sl, language, prefix, model, found, say)
     return found
+
+
+def _proof_batch(sl, language, prefix, model, found, say) -> None:
+    """One proofer call for the pages in *sl*; findings go into *found*.
+    Never raises (a failed batch only warns, as before)."""
+    blocks = "\n\n".join(
+        f"### PAGE {n}\nENGLISH SOURCE:\n\"\"\"\n{p['source']}\n\"\"\"\n\n"
+        f"{language} TRANSLATION:\n\"\"\"\n{p['target']}\n\"\"\""
+        for n, p in enumerate(sl, 1))
+    instruction = (
+        f"\n\nProofread each of the {len(sl)} page(s) below.\n"
+        "Return JSON: {\"pages\":[{\"n\":<page number>,\"findings\":"
+        f"[{{\"sentence\":\"<exact {language} sentence>\",\"severity\":"
+        "\"review\"|\"polish\",\"reason\":\"<short English reason>\","
+        f"\"suggestions\":[\"<replacement {language} sentence>\"]}}]}}]}}\n"
+        "Include every page number exactly once, with an empty findings "
+        "list when the page is clean.\n\n")
+    try:
+        data = _ai_call(instruction + blocks, model, "proofer", 0.2,
+                        attempts=2, static_prefix=prefix)
+        pages = data.get("pages") if isinstance(data, dict) else None
+        for page in pages or []:
+            try:
+                n = int(page.get("n"))
+            except Exception:                        # noqa: BLE001
+                continue
+            if not 1 <= n <= len(sl):
+                continue
+            it = sl[n - 1]
+            found[it["id"]] = sanitise_findings(page.get("findings"),
+                                                it["target"])
+    except Exception as e:                           # noqa: BLE001
+        say(f"WARNING: proofer batch of {len(sl)} page(s) did not run "
+            f"({str(e)[:120]}) — those pages have no findings.")

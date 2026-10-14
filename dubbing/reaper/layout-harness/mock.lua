@@ -318,6 +318,18 @@ end
 R.GetProjectName   = function() return '', 'Sadhguru_Aug19.rpp' end
 R.EnumProjects     = function() return nil, '' end
 R.GetProjectPath   = function() return 'C:\\proj' end
+R.GetPlayState      = function() return 0 end
+R.GetPlayPosition   = function() return 0 end
+R.GetCursorPosition = function() return 0 end
+R.GetProjectLength = function()
+  local e = 0
+  for _, tr in ipairs(_tracks()) do
+    for _, it in ipairs(tr.items or {}) do
+      e = math.max(e, (it.pos or 0) + (it.len or 0))
+    end
+  end
+  return e
+end
 R.GetResourcePath  = function() return 'C:\\reaper' end
 R.defer            = function() end
 R.ShowConsoleMsg   = function() end
