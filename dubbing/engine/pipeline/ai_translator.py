@@ -1075,6 +1075,8 @@ def review_assist(english: str, current: str, speech_s: float, hard_s: float,
         "are optional then.\n"
         "- Tone, word choice, alternatives, questions: answer, and give 2-3 "
         "alternatives when useful.\n"
+        "- When the instruction names how many alternatives (e.g. AT LEAST "
+        "3), that count wins over the 2-3 above.\n"
         f"- Alternatives are complete drop-in {language} lines. Never put "
         "the \" character inside them; use ‘ ’ for quotes.\n"
         "- \"reply\" is one or two short English sentences explaining what "

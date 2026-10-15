@@ -7138,7 +7138,7 @@ function V5.start_skip_pauses(item, add_s)
   V5.skip_pending = { guid = _item_guid(item), add = adding }
   return launch_engine(cmd, "skip", {
     "[panel] Python : " .. py,
-    adding and string.format("[panel] Mode   : Longer (add pauses) — " ..
+    adding and string.format("[panel] Mode   : Longer (add silence) — " ..
                              "%.2f s of silence into the pauses", add_s)
            or "[panel] Mode   : Shorter (skip pauses) — cut the pauses out of a chunk",
     "[panel] Source : " .. path,
@@ -12939,16 +12939,23 @@ V5.ASSIST_QUICK = {
     'slot, using natural connecting words and phrasing. Never add new ' ..
     'meaning; keep every name and number.' },
   -- v0.22.1: same words, longer through pauses where a speaker breathes.
+  -- v0.29.10: three dots (...) are THE pause mark now, and at least three
+  -- suggestions; an AI text ask on both screens again (the audio version
+  -- moved to "Longer (add silence)" below).
   { 'Longer (add pauses)',
     'Increase the length using pauses: keep the SAME words, meaning, names ' ..
     'and numbers and add no new words. Make it take longer to speak by ' ..
-    'adding natural pauses where a speaker would breathe: commas at clause ' ..
-    'breaks, a dash or three dots (...) before an important phrase, and a ' ..
-    'full stop between two thoughts. Never inside a name or a number. Give ' ..
-    '2-3 alternatives with a different amount of pausing.',
-    -- v0.29.7: on the Regenerate tab this puts silence INTO the take's
-    -- pauses (add_audio); the review screen still asks for the text.
-    add_audio = true },
+    'adding three dots (...) where a speaker would pause or breathe: at ' ..
+    'clause breaks, before an important phrase, and between two thoughts. ' ..
+    'Never inside a name or a number. Give AT LEAST 3 alternatives (3-4), ' ..
+    'from a few added ... to many, so each one is longer than the last.' },
+  -- v0.29.10: the v0.29.7 audio route under its own name — silence INTO the
+  -- take's pauses, no AI. Regenerate tab only (the review screen has no
+  -- audio yet), hence regen_only.
+  { 'Longer (add silence)',
+    'Put silence between the words of this chunk\'s audio: same words, ' ..
+    'same voice, no credits.',
+    add_audio = true, regen_only = true },
   { 'Shorter (fewer words)',
     'Shorten the length by changing or using fewer words: give 2-3 shorter ' ..
     'renderings that fit the slot. Drop filler and repetition before ' ..
@@ -12975,15 +12982,17 @@ function V5.review_assist_ui(ctx, R, row)
   local idx = row.index
   V5.wrap_begin(ctx, 4)
   for k, q in ipairs(V5.ASSIST_QUICK) do
-    local w = V5.btn_w(ctx, q[1])
-    V5.wrap_next(ctx, w)
-    _ui_begin_disabled(ctx, busy)
-    if reaper.ImGui_Button(ctx, q[1] .. '##aq' .. k, w, 0) and not busy then
-      V5.assist_request(R, idx, q[2])
-    end
-    _ui_end_disabled(ctx)
-    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
+    if not q.regen_only then
+      local w = V5.btn_w(ctx, q[1])
+      V5.wrap_next(ctx, w)
+      _ui_begin_disabled(ctx, busy)
+      if reaper.ImGui_Button(ctx, q[1] .. '##aq' .. k, w, 0) and not busy then
+        V5.assist_request(R, idx, q[2])
+      end
+      _ui_end_disabled(ctx)
+      if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+        reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
+      end
     end
   end
   V5.wrap_end()

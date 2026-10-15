@@ -168,6 +168,16 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+33. **v0.29.10: "Longer (add pauses)" is an AI ask again; audio moves to
+    "Longer (add silence)".** The assistant button now asks for the SAME
+    words with three dots (...) at natural pause points and AT LEAST 3
+    alternatives (3-4, increasingly paused), on the review screen and the
+    Regenerate tab alike. The v0.29.7 audio route (silence into the take,
+    no AI, `--add-pauses`) is unchanged under its own button, "Longer (add
+    silence)", Regenerate tab only (`regen_only` in `V5.ASSIST_QUICK`).
+    `review_assist`'s system prompt lets an explicit count in the
+    instruction override its default 2-3. No file format changes.
+
 32. **v0.29.9: Windows curl survives a blocked revocation check.** Schannel
     curl fails with exit 35 `CRYPT_E_NO_REVOCATION_CHECK` when an
     HTTPS-scanning antivirus or the network blocks the CA's revocation
