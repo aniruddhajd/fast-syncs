@@ -12,6 +12,7 @@ _G.__H = {
   failure = function(ctx) ui_phase_failure(ctx, function() end) end,
   -- v0.21: the Regenerate tab (Learn from final dub sits in its chip row).
   regen   = function(ctx) ui_regen_section(ctx) end,
+  regen_compact = function(ctx) ui_regen_section(ctx, true) end,  -- v0.29.14 popup
   set_regen_dir = function(d) _regen_out_dir = d end,
 
   set_phase = function(p) _ui_phase = p end,

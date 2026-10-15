@@ -168,6 +168,29 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+37. **v0.29.14: Redo-line popup on a keyboard shortcut.** Select a dub
+    chunk (an item on a "Dub Chunks…" or "Un sync" track, `V5.is_chunk_item`)
+    and press the user's shortcut: a small floating window opens,
+    `Redo line###dub_redo` (`V5.redo_popup`), drawn after the Settings
+    window. The shortcut belongs to the new action script
+    `dubbing/reaper/Dub_Redo_Line.lua` ("Dub: Redo this line"), registered by
+    the panel (`V5.redo_action_cmd`); "Set a shortcut…" on the Redo screen and
+    in the popup (`V5.redo_shortcut_ui`) opens REAPER's own shortcut dialog
+    (`DoActionShortcutDialog`, raised after Begin/End like the update
+    dialog) and then shows the bound key. On anything but a dub chunk the
+    action says so in a message box. It sets the non-persistent ext state
+    `dub_pipeline/redo_req` (a time_precise stamp); the panel polls it and
+    keeps a heartbeat in `dub_pipeline/alive` (once a second, cleared on
+    close) so the action launches the panel only when it is not running.
+    Once open, the popup follows the selected chunk. It is the compact
+    `ui_regen_section(ctx, true)`: where you are + ↑/↓, the neighbour
+    lines, the text box, fit bar, speed + assistant, Regenerate, and the
+    take-that-came-back row. Not in it: export/learn chips, timing nudges,
+    waveform, voice picker, output folder ("Open the full Redo screen"
+    goes there). Closing it hides it until the shortcut is pressed again; hidden
+    while the main panel is on Tools → Redo one line. No file format
+    changes. Harness case `popup/redo(compact)`.
+
 36. **v0.29.13: select several chunks in the Redo-line waveform.** In the
     dub lane, Ctrl+click (Cmd on Mac) adds or removes one chunk and
     Shift+click selects every chunk from the selection to the clicked one,

@@ -1185,6 +1185,21 @@ do  -- the audio button is really drawn on the Regenerate tab
   end
   if not found then fail('screen/regen [skip pauses present]', 'button not drawn') end
 end
+-- v0.29.14: the Redo-line popup body (compact) at popup widths: Regenerate
+-- is there, the voice picker is not.
+sweep('popup/redo(compact)', function(c) H.regen_compact(c) end,
+      { 760, 560, 420 })
+do
+  local t = draw('popup/redo [contents]', function(c) H.regen_compact(c) end)
+  local regen, voice = false, false
+  for _, it in ipairs((t and t.items) or {}) do
+    local l = tostring(it.label)
+    if l:find('Regenerate this line', 1, true) then regen = true end
+    if l:find('CHANGE VOICE', 1, true) then voice = true end
+  end
+  if not regen then fail('popup/redo [contents]', 'Regenerate not drawn') end
+  if voice then fail('popup/redo [contents]', 'voice picker drawn in compact') end
+end
 T.set_project({ tracks = {} })
 H.set_manifest({ status = 'ok', language = 'Hindi', out_dir = 'C:/runs/talk',
                  en_audio = 'a', tts_wav = 'b', synced_count = '12',

@@ -9714,7 +9714,11 @@ function V5.clear_memory_chip(ctx)
   _ui_end_disabled(ctx)
 end
 
-local function ui_regen_section(ctx)
+-- v0.29.14: *compact* = the Redo-line popup (V5.redo_popup): the line, its
+-- fit, speed + assistant, Regenerate and the take that came back. No export
+-- chips, timing, waveform or voice picker — those stay on the full screen.
+-- Same state (_regen_text etc.) either way, so the two never disagree.
+local function ui_regen_section(ctx, compact)
   V5.prefill_regen_target()
   V5.script_font_warning(ctx)
 
@@ -9729,6 +9733,7 @@ local function ui_regen_section(ctx)
   end
 
   -- Edited script out of the timeline (regen never rewrites FinalScript).
+  if not compact then
   if V5.chip(ctx, '⤓ Export edited script##exportedited',
              'Write the text of every dub clip, as it is on the timeline ' ..
              'now, to <name>_FinalScript_edited.txt and <name>_edited.srt ' ..
@@ -9737,7 +9742,10 @@ local function ui_regen_section(ctx)
     ui_set_banner(ok and "info" or "error", msg)
   end
   V5.learn_final_chip(ctx)
+  -- v0.29.14: the keyboard shortcut that opens the Redo-line popup.
+  V5.redo_shortcut_ui(ctx)
   reaper.ImGui_Dummy(ctx, 0, 4)
+  end
 
   local item = reaper.CountSelectedMediaItems(0) > 0
                and reaper.GetSelectedMediaItem(0, 0) or nil
@@ -9813,6 +9821,7 @@ local function ui_regen_section(ctx)
                'dropped, exactly as it is when you click another item.')
 
   -- Edit time: offset against the English ("+4.25 s"), typed or nudged.
+  if not compact then
   V5.chunk_time_ui(ctx, sel, pos, slot, prev_it, next_it)
   -- ...and the two waveforms it is measured between, behind a toggle that
   -- REAPER remembers across sessions (ext state, persisted).
@@ -9830,6 +9839,7 @@ local function ui_regen_section(ctx)
     V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
   end
   V5.space_play_pause(ctx)   -- Space works with the view hidden too
+  end
 
   reaper.ImGui_Dummy(ctx, 0, 4)
   V5.chunk_neighbour(ctx, prev_it, '↑')
@@ -9976,6 +9986,9 @@ local function ui_regen_section(ctx)
     end
     end
   end
+
+  -- The popup stops here: voice and output folder live on the full screen.
+  if compact then return end
 
   -- ── Optional: a different voice ─────────────────────────
   -- v0.8: same text, different voice. Behind a reveal because leaving it
@@ -16675,6 +16688,141 @@ function V5.ui_settings_window(ctx)
   V5.settings_open = open and true or false
 end
 
+-- v0.29.14: a dub chunk = an item on a "Dub Chunks…" or "Un sync" track.
+-- Dub_Redo_Line.lua applies the same rule before asking for the popup.
+function V5.is_chunk_item(item)
+  if not item then return false end
+  local _, tn = reaper.GetSetMediaTrackInfo_String(
+    reaper.GetMediaItem_Track(item), 'P_NAME', '', false)
+  tn = tn or ''
+  return tn:sub(1, #TRACK_CHUNKS) == TRACK_CHUNKS or tn == V5.TRACK_UNSYNC
+end
+
+-- v0.29.14 keyboard shortcut → Redo line. The action is Dub_Redo_Line.lua
+-- beside this file ("Dub: Redo this line"), registered once per session; the
+-- key itself is the user's, set through REAPER's own shortcut dialog.
+V5.REDO_SCRIPT = SCRIPT_DIR .. SEP .. 'Dub_Redo_Line.lua'
+function V5.redo_action_cmd()
+  if V5.redo_cmd == nil then
+    V5.redo_cmd = false
+    if reaper.AddRemoveReaScript and file_exists(V5.REDO_SCRIPT) then
+      local ok, cmd = pcall(reaper.AddRemoveReaScript, true, 0, V5.REDO_SCRIPT, true)
+      if ok and cmd and cmd ~= 0 then V5.redo_cmd = cmd end
+    end
+  end
+  return V5.redo_cmd or nil
+end
+
+-- The key(s) bound to it in the Main section, e.g. "Ctrl+R" — '' for none.
+function V5.redo_shortcut_desc()
+  local cmd = V5.redo_action_cmd()
+  if not (cmd and reaper.SectionFromUniqueID and reaper.CountActionShortcuts
+          and reaper.GetActionShortcutDesc) then return '' end
+  local sec = reaper.SectionFromUniqueID(0)
+  local out = {}
+  for i = 0, (reaper.CountActionShortcuts(sec, cmd) or 0) - 1 do
+    local ok, d = reaper.GetActionShortcutDesc(sec, cmd, i, '')
+    if ok and d and d ~= '' then out[#out + 1] = d end
+  end
+  return table.concat(out, ', ')
+end
+
+-- The row on the full Redo screen and at the foot of the popup.
+function V5.redo_shortcut_ui(ctx)
+  if not (V5.redo_action_cmd() and reaper.DoActionShortcutDialog
+          and reaper.SectionFromUniqueID) then
+    _grey_hint(ctx, 'A shortcut for the Redo-line window needs a newer ' ..
+                    'REAPER (6.x).')
+    return
+  end
+  local keys = V5.redo_shortcut_desc()
+  if keys ~= '' then
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), V5.COL.step_ok)
+    reaper.ImGui_Text(ctx, 'Select a chunk + ' .. keys .. ' opens Redo line')
+    reaper.ImGui_PopStyleColor(ctx)
+    reaper.ImGui_SameLine(ctx, 0, 8)
+    if reaper.ImGui_SmallButton(ctx, 'Change…##redokbchg') then
+      V5.redo_kb_dialog = 0          -- replace the first shortcut
+    end
+  else
+    if V5.chip(ctx, '⌨ Set a shortcut for Redo line##redokbset',
+               'Pick a key (for example R). Then: select a dub chunk in ' ..
+               'the arrange view, press it, and this small Redo window ' ..
+               'opens on that chunk — no trip through Tools. Uses REAPER\'s ' ..
+               'own shortcut dialog for the action "Dub: Redo this line"; ' ..
+               'you can change or remove it there or in the Actions list.') then
+      V5.redo_kb_dialog = -1         -- add a new shortcut
+    end
+  end
+end
+
+-- REAPER's shortcut dialog is modal, so — like the update dialog — it is
+-- raised from frame() after every Begin/End pair has closed, never mid-draw.
+function V5.redo_shortcut_dialog_if_due()
+  local idx = V5.redo_kb_dialog
+  if idx == nil then return end
+  V5.redo_kb_dialog = nil
+  local cmd = V5.redo_action_cmd()
+  if not cmd then return end
+  pcall(reaper.DoActionShortcutDialog, reaper.GetMainHwnd(),
+        reaper.SectionFromUniqueID(0), cmd, idx)
+end
+
+-- v0.29.14: the Redo-line popup. The shortcut (above) runs Dub_Redo_Line.lua,
+-- which sets dub_pipeline/redo_req; a new value opens a small floating window
+-- with the compact ui_regen_section. From then on it follows whatever chunk
+-- is selected; closing it hides it until the shortcut is pressed again.
+-- Hidden while the main panel is ON the Redo screen, which already shows the
+-- same thing. dub_pipeline/alive is the heartbeat that tells
+-- Dub_Redo_Line.lua the panel is already running.
+function V5.redo_popup(ctx)
+  local now = reaper.time_precise()
+  if now - (V5.alive_at or 0) >= 1 then
+    V5.alive_at = now
+    reaper.SetExtState('dub_pipeline', 'alive', string.format('%.3f', now), false)
+  end
+  local req = reaper.GetExtState('dub_pipeline', 'redo_req')
+  if V5.redo_req_seen == nil then
+    -- First frame: a request only a few seconds old is the key press that
+    -- started the panel; anything older is left over from an earlier session.
+    V5.redo_req_seen = req
+    if now - (tonumber(req) or -1e9) < 5 then V5.redo_pop_open = true end
+  elseif req ~= V5.redo_req_seen then
+    V5.redo_req_seen, V5.redo_pop_open = req, true
+  end
+
+  local item = reaper.CountSelectedMediaItems(0) > 0
+               and reaper.GetSelectedMediaItem(0, 0) or nil
+  if not V5.is_chunk_item(item) then item = nil end
+  if not (V5.redo_pop_open and item) then return end
+  if V5.nav == 'tools' and V5.tool == 'regen' and not V5.win.rolled
+     and _ui_window_open then return end
+
+  reaper.ImGui_SetNextWindowSize(ctx, 560, 470, reaper.ImGui_Cond_FirstUseEver())
+  local visible, open = reaper.ImGui_Begin(ctx, 'Redo line###dub_redo', true)
+  if visible then
+    local sv, sc = V5.push_console_style(ctx)
+    local sf = V5.push_ui_font(ctx)
+    _ui_render_banner(ctx)
+    ui_regen_section(ctx, true)
+    reaper.ImGui_Dummy(ctx, 0, 6)
+    reaper.ImGui_Separator(ctx)
+    V5.redo_shortcut_ui(ctx)
+    if reaper.ImGui_SmallButton(ctx, 'Open the full Redo screen##redofull') then
+      -- Timing, waveform, voice: the main panel, on the same chunk.
+      V5.nav, V5.tool = 'tools', 'regen'
+      V5.win_roll(false)
+      save_settings()
+      open = false
+    end
+    V5.pop_ui_font(ctx, sf)
+    V5.pop_console_style(ctx, sv, sc)
+    -- ReaImGui: End() only when Begin() returned true (see ui_settings_window).
+    reaper.ImGui_End(ctx)
+  end
+  if not open then V5.redo_pop_open = false end
+end
+
 -- ── v0.20 window chrome ─────────────────────────────────────
 -- Dear ImGui's title bar offers exactly one control — a ✕ the size of a glyph
 -- — and no way to add a second. So the window is opened with NoTitleBar and
@@ -17498,6 +17646,9 @@ local function main()
     -- v0.13: the settings window is a sibling top-level window, drawn after
     -- the main one closes its Begin/End pair. Closing it never closes the app.
     V5.ui_settings_window(_ui_ctx)
+    -- v0.29.14: and the Redo-line popup, the same way.
+    V5.redo_popup(_ui_ctx)
+    V5.redo_shortcut_dialog_if_due()
 
     -- v0.16: raised AFTER the Begin/End pair closes. reaper.MB is a blocking
     -- native dialog, and blocking with an ImGui frame half-drawn is a good way
@@ -17507,6 +17658,10 @@ local function main()
     _ui_window_open = _ui_window_open and open
     if _ui_window_open then
       reaper.defer(frame)
+    else
+      -- v0.29.14: no heartbeat = Dub_Redo_Line.lua starts the panel again
+      -- on the next key press instead of waiting 3 s for it to go stale.
+      reaper.SetExtState('dub_pipeline', 'alive', '', false)
     end
     -- If the window closes mid-run, the engine keeps running (run_dub.py
     -- still writes log/pid/done); we simply stop polling. Import later with
