@@ -168,6 +168,14 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+38. **v0.29.15: "Prompt agents · test" and "ElevenLabs Dub" hidden** (the
+    user's call). Both buttons are gone from the Dub screen's Script row,
+    the same way "AI · learns" was in v0.30 (`V5.PROMPT_AGENTS_ON`,
+    `V5.ELEVEN_DUB_ON`, both false). A settings file saved with
+    `script_mode` "prompt_agents" or "eleven" loads as "auto" (Prompt
+    chain). The engine's `--script-source prompt_agents` / `eleven` paths
+    are untouched; set a flag true to bring a button back.
+
 37. **v0.29.14: Redo-line popup on a keyboard shortcut.** Select a dub
     chunk (an item on a "Dub Chunks…" or "Un sync" track, `V5.is_chunk_item`)
     and press the user's shortcut: a small floating window opens,

@@ -676,6 +676,11 @@ local FULL_RUN   = false          -- true = v0.1 one-shot run (no review pause)
 -- switched off — the user's call. A saved "ai" loads as "auto". Set true to
 -- bring it back; the engine side (--script-source ai) is untouched.
 V5.AI_LEARNS_ON = false
+-- v0.29.15: "Prompt agents · test" and "ElevenLabs Dub" hidden the same way
+-- (the user's call): no button, a saved value loads as "auto". Set true to
+-- bring either back; the engine side is untouched.
+V5.PROMPT_AGENTS_ON = false
+V5.ELEVEN_DUB_ON    = false
 local SCRIPT_MODE = "auto"        -- v0.4: "auto" = LLM prompt chain,
                                   -- "have" = user pastes the translation,
                                   -- "ai" (v0.18) = self-learning translator
@@ -861,6 +866,10 @@ local function load_settings()
   end
   -- v0.30: AI · learns is off (V5.AI_LEARNS_ON) — never load into it.
   if SCRIPT_MODE == "ai" and not V5.AI_LEARNS_ON then SCRIPT_MODE = "auto" end
+  if SCRIPT_MODE == "prompt_agents" and not V5.PROMPT_AGENTS_ON then
+    SCRIPT_MODE = "auto"
+  end
+  if SCRIPT_MODE == "eleven" and not V5.ELEVEN_DUB_ON then SCRIPT_MODE = "auto" end
   local b = json_field(content, "full_run")
   if type(b) == "boolean" then FULL_RUN = b end
   b = json_field(content, "ai_speedup")
@@ -14843,10 +14852,12 @@ function V5.ui_source_inputs(ctx)
   }
   -- v0.30: drop the hidden "AI · learns" button (V5.AI_LEARNS_ON). By value,
   -- not index, so reordering the list above cannot remove the wrong one.
-  if not V5.AI_LEARNS_ON then
-    for i = #script_opts, 1, -1 do
-      if script_opts[i][1] == 'ai' then table.remove(script_opts, i) end
-    end
+  -- v0.29.15: and the hidden "Prompt agents · test" / "ElevenLabs Dub".
+  local hide = { ai = not V5.AI_LEARNS_ON,
+                 prompt_agents = not V5.PROMPT_AGENTS_ON,
+                 eleven = not V5.ELEVEN_DUB_ON }
+  for i = #script_opts, 1, -1 do
+    if hide[script_opts[i][1]] then table.remove(script_opts, i) end
   end
   local mode = V5.segmented(ctx, 'scriptmode', SCRIPT_MODE, script_opts)
   if mode ~= SCRIPT_MODE then
