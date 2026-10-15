@@ -8873,6 +8873,16 @@ function V5.cut_chunk(it, t)
   end
 end
 
+-- v0.29.13: is the Ctrl or Shift key held? *which* = 'Ctrl' | 'Shift'. New
+-- ReaImGui names them Mod_*, old builds KeyModFlags_* — the same fallback the
+-- wheel code below uses. On macOS ImGui's Ctrl is the Cmd key.
+function V5.mod_down(ctx, which)
+  if not reaper.ImGui_GetKeyMods then return false end
+  local f = reaper['ImGui_Mod_' .. which] or reaper['ImGui_KeyModFlags_' .. which]
+  local bit = f and f() or 0
+  return bit ~= 0 and (reaper.ImGui_GetKeyMods(ctx) & bit) ~= 0
+end
+
 -- The view itself. *sel* is the selection (moved together), *idx* the first
 -- chunk's number on its track.
 function V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
@@ -9057,11 +9067,34 @@ function V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
       -- loads into the text box below, as if picked in the arrange view).
       -- On the chunk that is already open, it places the edit cursor there
       -- instead — that is where "Cut" will split it.
+      -- v0.29.13: Ctrl+click (Cmd on Mac) adds/removes one chunk, Shift+click
+      -- selects every chunk from the selection to the clicked one — the same
+      -- multi-chunk selection the arrange view makes (V5.regen_selection),
+      -- so the group moves and regenerates as one line.
       local mx = reaper.ImGui_GetMousePos(ctx)
       local t = t0 + (mx - x0) / pps
+      local ctrl, shift = V5.mod_down(ctx, 'Ctrl'), V5.mod_down(ctx, 'Shift')
       for _, e in ipairs(all) do
         if t >= e.p and t <= e.p + e.l then
-          if is_sel[e.it] then
+          if ctrl then
+            -- Never empty the selection: the screen needs one chunk.
+            if not (is_sel[e.it] and #sel == 1) then
+              reaper.SetMediaItemSelected(e.it, not is_sel[e.it])
+              reaper.UpdateArrange()
+            end
+          elseif shift then
+            local a = math.min(pos, e.p)
+            local b = math.max(reaper.GetMediaItemInfo_Value(sel[#sel], 'D_POSITION'),
+                               e.p)
+            for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
+              local it = reaper.GetTrackMediaItem(tr, i)
+              local p = reaper.GetMediaItemInfo_Value(it, 'D_POSITION')
+              if p >= a - 0.0005 and p <= b + 0.0005 then
+                reaper.SetMediaItemSelected(it, true)
+              end
+            end
+            reaper.UpdateArrange()
+          elseif is_sel[e.it] then
             reaper.SetEditCurPos(t, false, false)
           else
             V5.select_chunk(e.it)
@@ -9080,13 +9113,15 @@ function V5.chunk_wave_ui(ctx, sel, pos, slot, idx)
       if not is_sel[e.it] and t >= e.p and t <= e.p + e.l then
         local s = V5.get_item_text(e.it)
         tip = V5.wrap(s ~= '' and s or '(no text stored on that item)') ..
-              '\n\nClick to open this chunk.'
+              '\n\nClick to open this chunk. Ctrl+click to add it to the ' ..
+              'selection, Shift+click to select every chunk up to it.'
         break
       end
     end
     reaper.ImGui_SetTooltip(ctx, tip or V5.wrap('Drag sideways to move ' ..
       'this chunk against the English (one undo step). Click on it to put ' ..
-      'the cut line there. Click a grey chunk to open it.'))
+      'the cut line there. Click a grey chunk to open it; Ctrl+click to ' ..
+      'add or remove one, Shift+click to select a run of chunks.'))
   end
 
   -- Scroll bar: drag the thumb (or anywhere on the bar) to slide the view.

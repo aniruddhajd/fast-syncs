@@ -168,6 +168,14 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+36. **v0.29.13: select several chunks in the Redo-line waveform.** In the
+    dub lane, Ctrl+click (Cmd on Mac) adds or removes one chunk and
+    Shift+click selects every chunk from the selection to the clicked one,
+    on that track. It sets REAPER's item selection, so it is the same
+    multi-chunk selection the arrange view makes (`V5.regen_selection`):
+    the group drags, nudges and regenerates as one line. A plain click is
+    unchanged. The last selected chunk cannot be Ctrl-clicked away.
+
 35. **v0.29.12: the panel reopens at the size and spot it was left at.**
     ReaImGui's own `.ini` did not keep the window size on every machine, so
     the panel came back small each session. The panel settings file gains
