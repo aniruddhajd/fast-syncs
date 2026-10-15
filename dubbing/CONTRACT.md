@@ -168,6 +168,14 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+35. **v0.29.12: the panel reopens at the size and spot it was left at.**
+    ReaImGui's own `.ini` did not keep the window size on every machine, so
+    the panel came back small each session. The panel settings file gains
+    an optional `"win_rect": "x,y,w,h,max"` (max = 1 when maximised with
+    the caption button), written 1 s after a move/resize settles
+    (`V5.win_track`) and applied once on the first frame. Absent or
+    mangled = old behaviour. The off-screen rescue still runs after it.
+
 34. **v0.29.11: "Longer (add silence)" button removed** (the user's call).
     The Regenerate tab no longer offers the audio route; the engine's
     `--add-pauses` and `pause_skip.add_pauses_segment` stay, unused by the

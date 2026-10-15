@@ -358,6 +358,7 @@ local V5 = {
   -- "which rail destination" — and Settings is one of them.
   nav           = "dub",     -- dub | sync | tools | log | settings
   ui_gen        = 0,         -- layout generation; a bump resizes the window once
+  win_rect      = nil,       -- v0.29.12 {x,y,w,h,max}: reopen where it was left
   -- v0.29 Proof (the review screen). Here for the same reason as the rest of
   -- this block: load_settings() restores them long before the review code is
   -- defined, so a default assigned down there would overwrite what was loaded.
@@ -894,6 +895,16 @@ local function load_settings()
   if rpx == 13 or rpx == 15 or rpx == 17 then V5.review_px = rpx end
   v = jval("review_layout")
   if v == "list" or v == "grid" then V5.review_layout = v end
+  -- v0.29.12: the window's own rect, "x,y,w,h,max". Absent or mangled =
+  -- nil, and ReaImGui's .ini (or the 900 x 600 default) decides as before.
+  v = jval("win_rect")
+  if v then
+    local x, y, w, h, m = v:match('^(%-?%d+),(%-?%d+),(%d+),(%d+),([01])$')
+    x, y, w, h = tonumber(x), tonumber(y), tonumber(w), tonumber(h)
+    if x and w >= 320 and h >= 240 then
+      V5.win_rect = { x = x, y = y, w = w, h = h, max = (m == '1') }
+    end
+  end
 
   -- Coerce a legacy/hand-edited language back into the supported set.
   local ok = false
@@ -935,6 +946,12 @@ local function save_settings()
   f:write(string.format('  "ui_gen": "%s",\n',        je(tostring(V5.ui_gen or 0))))
   f:write(string.format('  "review_px": %d,\n',       math.floor(V5.review_px or 15)))
   f:write(string.format('  "review_layout": "%s",\n', je(V5.review_layout or 'list')))
+  local wr = V5.win_rect
+  if wr then
+    f:write(string.format('  "win_rect": "%d,%d,%d,%d,%d",\n',
+      math.floor(wr.x), math.floor(wr.y), math.floor(wr.w), math.floor(wr.h),
+      wr.max and 1 or 0))
+  end
   f:write(string.format('  "last_audio": "%s"\n',  je(LAST_AUDIO)))
   f:write('}\n')
   f:close()
@@ -16802,6 +16819,33 @@ function V5.win_apply(ctx)
   end
 end
 
+-- v0.29.12: remember where the window is, for the next session (the restore
+-- is in frame()). Called between Begin and End every frame; writes the
+-- settings file only once the rect has been different for 1 s, so a drag or
+-- a resize costs one write, not one per frame. Rolled up is skipped: its
+-- 32 px height is not a size anyone wants to reopen at.
+function V5.win_track(ctx)
+  if V5.win.rolled then return end
+  if not (reaper.ImGui_GetWindowPos and reaper.ImGui_GetWindowSize) then return end
+  local ok,  x, y = pcall(reaper.ImGui_GetWindowPos, ctx)
+  local ok2, w, h = pcall(reaper.ImGui_GetWindowSize, ctx)
+  if not (ok and ok2) or type(x) ~= 'number' or type(w) ~= 'number' then return end
+  if w < 320 or h < 240 then return end
+  local max = V5.win.mode == 'max'
+  local r = V5.win_rect
+  if r and math.abs(r.x - x) < 1 and math.abs(r.y - y) < 1
+     and math.abs(r.w - w) < 1 and math.abs(r.h - h) < 1 and r.max == max then
+    V5.win_dirty = nil
+    return
+  end
+  local now = reaper.time_precise()
+  if not V5.win_dirty then V5.win_dirty = now return end
+  if now - V5.win_dirty < 1.0 then return end
+  V5.win_rect  = { x = x, y = y, w = w, h = h, max = max }
+  V5.win_dirty = nil
+  save_settings()
+end
+
 function V5.ui_titlebar(ctx, on_close)
   local H       = V5.TITLEBAR_H
   local wx, wy  = reaper.ImGui_GetWindowPos(ctx)
@@ -17255,10 +17299,21 @@ local function main()
       reaper.ImGui_SetNextWindowSize(_ui_ctx, 900, 600)
       V5.ui_gen = 1
       save_settings()
+    elseif V5.win_rect and not V5.win_restored then
+      -- v0.29.12: reopen at the size and spot it was left at, from our own
+      -- settings file — ReaImGui's .ini alone did not keep it on every
+      -- machine, so the panel came back small and had to be resized each
+      -- time. Once per session; after that the size is the user's again.
+      -- The off-screen rescue below still runs on top of this.
+      local r = V5.win_rect
+      reaper.ImGui_SetNextWindowPos(_ui_ctx, r.x, r.y)
+      reaper.ImGui_SetNextWindowSize(_ui_ctx, r.w, r.h)
+      if r.max then V5.win.mode = 'max' end
     else
       reaper.ImGui_SetNextWindowSize(_ui_ctx, 900, 600,
                                      reaper.ImGui_Cond_FirstUseEver())
     end
+    V5.win_restored = true
     -- v0.20: whatever the caption buttons asked for, applied here — after the
     -- block above on purpose, so a maximise wins over the one-time sizing.
     V5.win_apply(_ui_ctx)
@@ -17283,6 +17338,7 @@ local function main()
     -- Outside the `visible` guard on purpose: a fully off-screen window can
     -- report itself as not visible, which is the case we must still rescue.
     check_offscreen(_ui_ctx)
+    V5.win_track(_ui_ctx)
     if visible then
       -- v0.16 tokens for the whole frame; popped at the end of this block.
       local _sv, _sc = V5.push_console_style(_ui_ctx)
