@@ -168,6 +168,12 @@ module: `ai_memory` = `tm.ts`, `ai_checks` = `checks.ts`, `ai_agents` =
      voice credits: it is a text-only call, and `run_dub.py` forwards the
      flag.
 
+34. **v0.29.11: "Longer (add silence)" button removed** (the user's call).
+    The Regenerate tab no longer offers the audio route; the engine's
+    `--add-pauses` and `pause_skip.add_pauses_segment` stay, unused by the
+    panel. "Longer (add pauses)" (AI, three dots, 3+ alternatives) is the
+    one way to lengthen by pausing.
+
 33. **v0.29.10: "Longer (add pauses)" is an AI ask again; audio moves to
     "Longer (add silence)".** The assistant button now asks for the SAME
     words with three dots (...) at natural pause points and AT LEAST 3

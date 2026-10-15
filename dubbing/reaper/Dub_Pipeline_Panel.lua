@@ -9504,42 +9504,7 @@ function V5.regen_assist_ui(ctx, item, pos, slot, prev_it, next_it, items, key)
     end
   end
   for k, q in ipairs(V5.ASSIST_QUICK) do
-    if q.add_audio then
-      -- v0.29.7: silence into this chunk's pauses, sized to fill the room
-      -- before the next chunk (0.08 s kept clear); the last chunk on the
-      -- track gets the engine default (0.3 s per pause).
-      local one = #items == 1
-      local room = next_it and (gap - 0.08) or 0
-      local can = one and (not next_it or room >= 0.1)
-      local label = (V5.quiet_job == 'skip' and V5.skip_pending
-                     and V5.skip_pending.add) and '… Adding pauses' or q[1]
-      local w = V5.btn_w(ctx, label)
-      V5.wrap_next(ctx, w)
-      _ui_begin_disabled(ctx, busy or not can)
-      if reaper.ImGui_Button(ctx, label .. '##rgaq' .. k, w, 0)
-         and not busy and can then
-        V5.start_skip_pauses(item, room)
-      end
-      _ui_end_disabled(ctx)
-      if reaper.ImGui_IsItemHovered(ctx,
-           reaper.ImGui_HoveredFlags_AllowWhenDisabled
-           and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0)
-         and reaper.ImGui_SetTooltip then
-        reaper.ImGui_SetTooltip(ctx, V5.wrap(
-          not one and 'Select ONE chunk — silence is added take by take.'
-          or not can and ('No room: the next chunk starts right after this ' ..
-                          'one. Move it, or try Slow down.')
-          or next_it and string.format(
-               'Put %.2f s of silence between the words of this chunk\'s ' ..
-               'audio (pauses get twice a word gap\'s share), so it fills ' ..
-               'the gap before the next chunk: same words, same voice, no ' ..
-               'credits. The start stays where it is. "Put the old one ' ..
-               'back" undoes it.', room)
-          or ('Put silence between the words of this chunk\'s audio (0.12 s ' ..
-              'per word gap, 0.3 s per pause): same words, same voice, no ' ..
-              'credits. "Put the old one back" undoes it.')))
-      end
-    elseif q.skip_audio then
+    if q.skip_audio then
       -- v0.29.5: cut the pauses out of this chunk's audio (one chunk only:
       -- each selected chunk is its own take).
       local one = #items == 1
@@ -12941,7 +12906,7 @@ V5.ASSIST_QUICK = {
   -- v0.22.1: same words, longer through pauses where a speaker breathes.
   -- v0.29.10: three dots (...) are THE pause mark now, and at least three
   -- suggestions; an AI text ask on both screens again (the audio version
-  -- moved to "Longer (add silence)" below).
+  -- has no button since v0.29.11).
   { 'Longer (add pauses)',
     'Increase the length using pauses: keep the SAME words, meaning, names ' ..
     'and numbers and add no new words. Make it take longer to speak by ' ..
@@ -12949,13 +12914,8 @@ V5.ASSIST_QUICK = {
     'clause breaks, before an important phrase, and between two thoughts. ' ..
     'Never inside a name or a number. Give AT LEAST 3 alternatives (3-4), ' ..
     'from a few added ... to many, so each one is longer than the last.' },
-  -- v0.29.10: the v0.29.7 audio route under its own name — silence INTO the
-  -- take's pauses, no AI. Regenerate tab only (the review screen has no
-  -- audio yet), hence regen_only.
-  { 'Longer (add silence)',
-    'Put silence between the words of this chunk\'s audio: same words, ' ..
-    'same voice, no credits.',
-    add_audio = true, regen_only = true },
+  -- v0.29.11: the "Longer (add silence)" audio button (v0.29.7 route) was
+  -- removed from the UI; the engine's --add-pauses is still there.
   { 'Shorter (fewer words)',
     'Shorten the length by changing or using fewer words: give 2-3 shorter ' ..
     'renderings that fit the slot. Drop filler and repetition before ' ..
@@ -12982,17 +12942,15 @@ function V5.review_assist_ui(ctx, R, row)
   local idx = row.index
   V5.wrap_begin(ctx, 4)
   for k, q in ipairs(V5.ASSIST_QUICK) do
-    if not q.regen_only then
-      local w = V5.btn_w(ctx, q[1])
-      V5.wrap_next(ctx, w)
-      _ui_begin_disabled(ctx, busy)
-      if reaper.ImGui_Button(ctx, q[1] .. '##aq' .. k, w, 0) and not busy then
-        V5.assist_request(R, idx, q[2])
-      end
-      _ui_end_disabled(ctx)
-      if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-        reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
-      end
+    local w = V5.btn_w(ctx, q[1])
+    V5.wrap_next(ctx, w)
+    _ui_begin_disabled(ctx, busy)
+    if reaper.ImGui_Button(ctx, q[1] .. '##aq' .. k, w, 0) and not busy then
+      V5.assist_request(R, idx, q[2])
+    end
+    _ui_end_disabled(ctx)
+    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, V5.wrap(q[2]))
     end
   end
   V5.wrap_end()
